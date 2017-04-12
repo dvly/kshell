@@ -17,6 +17,8 @@ struct kshell_struct {
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
 
+static struct workqueue_struct *kshell_wq;
+
 static void remove_work(struct kshell_struct *w)
 {
 	spin_lock(&kc_lock);
@@ -144,10 +146,23 @@ static int __init hello_init(void)
 		goto out;
 	}
 
+	/* We start by using the default
+	 * Linux kernel worqueues
+	 */
+	kshell_wq = create_workqueue("kshell");
+	if (!kshell_wq)
+		goto out_unregister;
+
+
 	pr_info("[  kshell  ]  Module loaded successfully\n");
 
 	/* Test and remove the "not used warning */
 	test();
+	goto out;
+
+
+out_unregister:
+	unregister_chrdev(major, "kshell");
 
 out:
 	return 0;
@@ -156,6 +171,8 @@ module_init(hello_init);
 
 static void __exit hello_exit(void)
 {
+	flush_workqueue(kshell_wq);
+	destroy_workqueue(kshell_wq);
 	unregister_chrdev(major, "kshell");
 	pr_info("[  kshell  ]  Module unloaded successfully\n");
 }
