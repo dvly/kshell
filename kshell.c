@@ -77,7 +77,13 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
 	int rcu;
 
+	/*
+	 * extracts the type and number bitfields, and don't decode
+	 * wrong CMDs: return -ENOTTY (Inappriopariate ioctl) before switching.
+	*/
 	if (_IOC_TYPE(cmd) != KSHELL_IOC_MAGIC)
+		return -ENOTTY;
+	if (_IOC_NR(cmd) > KSHELL_IOC_MODINFO)
 		return -ENOTTY;
 
 	switch (cmd) {
@@ -113,7 +119,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		pr_info("[  kshell_ioctl ]  MODINFO.\n");
 		break;
 
-	default:
+	default: /* redudant, as cmd was checked before !*/
 		pr_info("[  kshell_ioctl ]  ERROR.\n");
 		return -ENOTTY;
 	}
