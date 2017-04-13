@@ -10,12 +10,24 @@ enum kshell_cmd {list, fg, kill, wait, meminfo, modinfo};
 struct kshell_struct {
 	struct work_struct work;
 	struct list_head list;
+
 	enum kshell_cmd cmd;
+	void *data;
+	int cmd_id;
 };
 
 /* List and lock for all CMDs */
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
+
+/* command's id and lock, for simplicity purpose:
+ * we can start by incrementing the cmd_id
+ * to generate an unique id for every command.
+ *
+ * We need to do it more efficiently later.
+ */
+static int cmd_id;
+static DEFINE_SPINLOCK(id_lock);
 
 static struct workqueue_struct *kshell_wq;
 
@@ -34,15 +46,19 @@ static void add_work(struct kshell_struct *w)
 	spin_unlock(&kc_lock);
 }
 
-static void list_handler(void)
+static void list_handler(struct work_struct *w)
 {
-	struct kshell_struct *f;
+	int rcu;
+	struct kshell_struct *p;
+	struct kshell_struct *s = container_of(w, struct kshell_struct, work);
 
 	spin_lock(&kc_lock);
-	list_for_each_entry(f, &kshell_cmd_list, list) {
-		switch (f->cmd) {
+	list_for_each_entry(p, &kshell_cmd_list, list) {
+		switch (p->cmd) {
 		case list:
-			pr_info("ls cmd\n");
+			rcu = copy_to_user(p->data, "TEST OK", 7);
+			if (rcu)
+				pr_info("[  kshell  ] copy_to_user error.\n");
 			break;
 
 		case fg:
@@ -71,11 +87,13 @@ static void list_handler(void)
 		}
 	}
 	spin_unlock(&kc_lock);
+	remove_work(s);
 }
+
 
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
-	int rcu;
+	struct kshell_struct *s;
 
 	/*
 	 * extracts the type and number bitfields, and don't decode
@@ -86,43 +104,59 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	if (_IOC_NR(cmd) > KSHELL_IOC_MODINFO)
 		return -ENOTTY;
 
+	s = kmalloc(sizeof(s), GFP_KERNEL);
+	if (!s)
+		return -ENOMEM;
+
+	spin_lock(&id_lock);
+	cmd_id += 1;
+	s->cmd_id = cmd_id;
+	spin_unlock(&id_lock);
+
+	s->data = (void *)arg;
+
 	switch (cmd) {
 	case KSHELL_IOC_TEST:
-		rcu = copy_to_user((void *)arg, "TEST ok", 7);
-		if (rcu)
-			pr_info("[  kshell_ioctl  ]  copy_to_user Error.\n");
-
-		pr_info("[  kshell  ] %d\n", rcu);
 		break;
 
 	case KSHELL_IOC_LIST:
-		pr_info("[  kshell_ioctl ]  list.\n");
+		s->cmd = list;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	case KSHELL_IOC_FG:
-		pr_info("[  kshell_ioctl ]  FG.\n");
+		s->cmd = fg;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	case KSHELL_IOC_KILL:
-		pr_info("[  kshell_ioctl ]  KILL.\n");
+		s->cmd = kill;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	case KSHELL_IOC_WAIT:
-		pr_info("[  kshell_ioctl ]  WAIT.\n");
+		s->cmd = wait;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	case KSHELL_IOC_MEMINFO:
-		pr_info("[  kshell_ioctl ]  MEMINFO.\n");
+		s->cmd = meminfo;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	case KSHELL_IOC_MODINFO:
-		pr_info("[  kshell_ioctl ]  MODINFO.\n");
+		s->cmd = modinfo;
+		INIT_WORK(&s->work, list_handler);
 		break;
 
 	default: /* redudant, as cmd was checked before !*/
 		pr_info("[  kshell_ioctl ]  ERROR.\n");
+		kfree(s);
 		return -ENOTTY;
 	}
+
+	add_work(s);
+	schedule_work(&s->work);
 
 	return 0;
 }
@@ -131,6 +165,7 @@ const struct file_operations kshell_fops = {
 	.unlocked_ioctl = kshell_ioctl
 };
 
+/*
 static void test(void)
 {
 	struct kshell_struct *s;
@@ -142,6 +177,7 @@ static void test(void)
 	list_handler();
 	remove_work(s);
 }
+*/
 
 static int __init hello_init(void)
 {
@@ -161,9 +197,8 @@ static int __init hello_init(void)
 
 
 	pr_info("[  kshell  ]  Module loaded successfully\n");
-
-	/* Test and remove the "not used warning */
-	test();
+	/* Test and remove the "not used warning
+	test();*/
 	goto out;
 
 
