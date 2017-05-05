@@ -7,30 +7,25 @@ ifneq ($(KERNELRELEASE),)
   obj-m := kshell.o
 
 else
-  KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+  KERNELDIR ?= /Vrac/linux-4.2.3/
   PWD := $(shell pwd)
 
 all :
 	make -C $(KERNELDIR) M=$(PWD) modules
 
-check :
-	for f in *.c *.h; do \
-		$(CHECK_PATCH) -f $$f; \
+cp:
+	cp kshell.ko ../tosend/kshell.ko
+
+check:
+	$(CHECK_PATCH) -f kshell.c
+
+check_test:
+	for f in *.c *.h; do
+		$(CHECK_PATCH) --no-tree -f $$f
 	done
-
-in :
-	insdev kshell
-
-out:
-	rmdev kshell
-
-run: comp
-	./test
-
-comp:
-	gcc -o test test.c
 
 clean:
 	make -C $(KERNELDIR) M=$(PWD) clean
-	rm test
+
 endif
+

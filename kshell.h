@@ -5,22 +5,17 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/delay.h>		/* msleep */
+#include <linux/sched.h>		/* TASK_INTERUPTIBLE*/
+#include <linux/capability.h>		/* capable*/
 
+#include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/mm.h>			/* si_meminfo */
+#include <linux/swap.h>			/* si_swapinfo */
+#include <linux/slab.h>			/* KMEM_CACHE, ...*/
 #include <asm/uaccess.h>		/* copy_*_user */
+#include <asm/page.h>			/* PAGE_SIZE */
+#include <linux/kref.h>			/* kref*/
 #include <linux/spinlock.h>
-#include <linux/ioctl.h>
 
-#define KSHELL_IOC_MAGIC 'N'
-
-#define KSHELL_IOC_LIST		_IOWR(KSHELL_IOC_MAGIC, 1, char *)
-#define KSHELL_IOC_FG		_IOWR(KSHELL_IOC_MAGIC, 2, char *)
-#define KSHELL_IOC_KILL		_IOWR(KSHELL_IOC_MAGIC, 3, char *)
-#define KSHELL_IOC_WAIT		_IOWR(KSHELL_IOC_MAGIC, 4, char *)
-#define KSHELL_IOC_MEMINFO	_IOWR(KSHELL_IOC_MAGIC, 5, char *)
-#define KSHELL_IOC_MODINFO	_IOWR(KSHELL_IOC_MAGIC, 6, char *)
-#define KSHELL_IOC_TEST		_IOWR(KSHELL_IOC_MAGIC, 7, char *)
-
-struct kshell_struct;
-static void remove_work(struct kshell_struct *);
-static void add_work(struct kshell_struct *);
+#define MAX_CMD_ID 100
