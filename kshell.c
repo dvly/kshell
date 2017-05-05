@@ -458,12 +458,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	if (unlikely(!s))
 		return -ENOMEM;
 
-	s->err = 0;
-	s->fg_flag = 0;
-	s->ioctl_flag = 0;
-	s->fg_ed_cmd_id = 0;
-	s->fg_ed = false;
-	s->synchro = false;
+	memset(s, '\0', sizeof(struct kshell_struct));
 	s->cmd_id = find_cmd_id();
 	s->user_datap = (void *)arg;
 	s->ubuffer_size = 64;
