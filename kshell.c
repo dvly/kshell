@@ -1,210 +1,580 @@
 #include "kshell.h"
+#include "common.h"
 
 MODULE_DESCRIPTION("Module \"kernel shell\" pour noyau linux");
 MODULE_AUTHOR("Sofiane IDRI - Davy LY, UPMC");
 MODULE_LICENSE("GPL");
+MODULE_VERSION("1");
 
 static int major;
+/* data transfer wait condition */
+//static int cp_flag;
+/* fg wait condition */
+static int fg_flag;
+static int fg_cmd;
+
+/* ioctl wait condition */
+static int ioctl_flag;
+static int ioctl_err;
+
+static int cmd_id[MAX_CMD_ID] = {0};
+static struct mutex id_mutex;
+
+static struct kmem_cache *kshell_struct_cachep;
+
 enum kshell_cmd {list, fg, kill, wait, meminfo, modinfo};
 
 struct kshell_struct {
 	struct work_struct work;
 	struct list_head list;
+	struct kref refcount;
 
 	enum kshell_cmd cmd;
-	void *data;
+	void *private_data;
+	void *user_datap;
+
+	int private_data_len;
+	int ubuffer_size;
 	int cmd_id;
+
+	int fg_flag;
+	int ioctl_flag;
+
+	/* Set this when wou put a synchro cmd tp the wq */
+	bool synchro;
+
+	/* Set this when `fg` found its job */
+	bool fg_ed;
+
+	/* return value from {list|fg|kill|...}_handler */
+	int err;
 };
 
 /* List and lock for all CMDs */
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
 
-/* command's id and lock, for simplicity purpose:
- * we can start by incrementing the cmd_id
- * to generate an unique id for every command.
- *
- * We need to do it more efficiently later.
- */
-static int cmd_id;
-static DEFINE_SPINLOCK(id_lock);
+static DECLARE_WAIT_QUEUE_HEAD(waiter);
 
 static struct workqueue_struct *kshell_wq;
 
-static void remove_work(struct kshell_struct *w)
+static void list_remove_work(struct kref *ref)
 {
+	struct kshell_struct *p = container_of(ref, struct kshell_struct,
+								refcount);
+
+	struct common *cp = (struct common *)p->user_datap;
+
 	spin_lock(&kc_lock);
-	list_del(&w->list);
-	kfree(w);
+	list_del(&p->list);
 	spin_unlock(&kc_lock);
+
+	/*
+	 * Data transfer - from kernel to user space.
+	 * Don't transfer/continue if p->err was set previously.
+	 */
+
+	if(!p->err)
+		p->err = copy_to_user((void *)cp->buffer, p->private_data, p->private_data_len);
+
+/*
+	while (!p->err && offset < p->private_data_len) {
+		offset += to_copy;
+		to_copy = min(p->private_data_len - offset, p->ubuffer_size);
+		p->err = copy_to_user((void *)cp->buffer, p->private_data + offset, to_copy);
+
+		if (to_copy < p->private_data_len) {
+			ioctl_flag = 1;
+			wake_up_interruptible(&waiter);
+
+			wait_event_interruptible(waiter, cp_flag != 0);
+			cp_flag = 0;
+		}
+	}
+*/
+
+	/* We need to reset cmd_id */
+	mutex_lock(&id_mutex);
+	cmd_id[p->cmd_id - 1] = 0;
+	mutex_unlock(&id_mutex);
+
+	/* Error transfer - from wq to ioctl and then to user space */
+	ioctl_err = p->err;
+	kmem_cache_free(kshell_struct_cachep, p);
 }
 
-static void add_work(struct kshell_struct *w)
+static void list_add_work(struct kshell_struct *w)
 {
 	spin_lock(&kc_lock);
 	list_add_tail(&w->list, &kshell_cmd_list);
 	spin_unlock(&kc_lock);
 }
 
-static void list_handler(struct work_struct *w)
+static void fg_handler(struct work_struct *w)
 {
-	int rcu;
-	struct kshell_struct *p;
-	struct kshell_struct *s = container_of(w, struct kshell_struct, work);
+	int cmd_id;
+	bool found = false;
+	struct kshell_struct *p, *ip;
+	DEFINE_WAIT(inq);
+
+	p = container_of(w, struct kshell_struct, work);
+	cmd_id = *(int *)p->user_datap;
 
 	spin_lock(&kc_lock);
-	list_for_each_entry(p, &kshell_cmd_list, list) {
-		switch (p->cmd) {
-		case list:
-			rcu = copy_to_user(p->data, "TEST OK", 7);
-			if (rcu)
-				pr_info("[  kshell  ] copy_to_user error.\n");
-			break;
+	list_for_each_entry(ip, &kshell_cmd_list, list) {
+		if (ip->cmd_id == cmd_id && !ip->fg_ed) {
+			/*
+			 * Recall, we have already a reference to this job.
+			 * check it out at kshell_ioctl.
+			 */
+			found = true;
+			ip->fg_ed = true;
 
-		case fg:
-			pr_info("fg cmd\n");
-			break;
-
-		case kill:
-			pr_info("kill cmd\n");
-			break;
-
-		case wait:
-			pr_info("wait cmd\n");
-			break;
-
-		case meminfo:
-			pr_info("meminfo cmd\n");
-			break;
-
-		case modinfo:
-			pr_info("modinfo cmd\n");
-			break;
-
-		default:
-			pr_info("error.\n");
+			/* we are going to clone ourselfs to this job */
+			ip->user_datap = p->user_datap;
+			list_del(&p->list);
+			kmem_cache_free(kshell_struct_cachep, p);
 			break;
 		}
 	}
 	spin_unlock(&kc_lock);
-	remove_work(s);
+
+	/* Job don't exist - still `fg` */
+	if (!found) {
+		p->err = -1;
+		goto out;
+	}
+  
+	prepare_to_wait(&waiter, &inq, TASK_INTERRUPTIBLE);
+	if (p->fg_flag == 0)
+		schedule();
+	finish_wait(&waiter, &inq);
+
+	p = ip;
+	p->fg_flag = 0;
+out:
+	p->ioctl_flag = 1;
+	kref_put(&p->refcount, list_remove_work);
+	wake_up_interruptible(&waiter);
 }
 
+static void list_handler(struct work_struct *w)
+{
+	int i, len, count, buffer_size;
+	char *buffer, *buffer_realloc, v[32];
+	struct kshell_struct *p, *ip;
+
+	i = 1;
+	len = 0;
+	count = 0;
+	buffer_size = BUFF_SIZE;
+	p = container_of(w, struct kshell_struct, work);
+
+	buffer = kmalloc(buffer_size, GFP_KERNEL);
+	if (!buffer) {
+		p->err = -ENOMEM;
+		goto out;
+	}
+
+	spin_lock(&kc_lock);
+	list_for_each_entry(ip, &kshell_cmd_list, list) {
+
+		switch (ip->cmd) {
+		case list:
+			len = scnprintf(v, sizeof(v), "list\t%d\n", ip->cmd_id);
+			break;
+
+		case kill:
+			len = scnprintf(v, sizeof(v), "kill\t%d\n", ip->cmd_id);
+			break;
+
+		case wait:
+			len = scnprintf(v, sizeof(v), "wait\t%d\n", ip->cmd_id);
+			break;
+
+		case meminfo:
+			len = scnprintf(v, sizeof(v), "minfo\t%d\n", ip->cmd_id);
+			break;
+
+		case modinfo:
+			len = scnprintf(v, sizeof(v), "dinfo\t%d\n", ip->cmd_id);
+			break;
+
+		default:
+			continue;
+		}
+
+		/* use `while` as we can't trust the `if` statement, Got it? */
+		while (count + len >= buffer_size) {
+			i *= 2;
+			buffer_size = BUFF_SIZE * i;
+			buffer_realloc = buffer;
+
+			buffer = kmalloc(buffer_size, GFP_KERNEL);
+			if (!buffer_realloc) {
+				kfree(buffer_realloc);
+				p->err = -ENOMEM;
+				goto out;
+			}
+
+			memcpy((void *)buffer, (void *)buffer_realloc, buffer_size / 2);
+			kfree(buffer_realloc);
+		}
+
+		strncat(buffer, v, len);
+		count += len;
+	}
+	spin_unlock(&kc_lock);
+
+	p->private_data = buffer;
+	p->private_data_len = count;
+out:
+	/* wake up the sleeped thread */
+	kref_put(&p->refcount, list_remove_work);
+	ioctl_flag = 1;
+	wake_up_interruptible(&waiter);
+
+        if (p->synchro) {
+                fg_flag = 1;
+                wake_up_interruptible(&waiter);
+        }
+
+        else {
+                p->ioctl_flag = 1;
+                wake_up_interruptible(&waiter);
+	}
+}
+
+/*
+static int copy_to_struct(void __user *u, unsigned long num)
+{
+
+	char v[32];
+	int len;
+*/
+	/*
+	 * display in kilobytes.
+	 */
+/*
+	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10));
+
+	return copy_to_user(u, (const void *)v, len);
+	return 0;
+}
+*/
+
+static void meminfo_handler(struct work_struct *w)
+{
+/*
+	int err;
+	struct sysinfo si;
+	struct kshell_struct *p;
+	struct meminfo_common *mi;
+
+	p = container_of(w, struct kshell_struct, work);
+	mi = (struct meminfo_common *)p->user_datap;
+
+	si_meminfo(&si);
+	si_swapinfo(&si);
+	err = copy_to_struct((void __user*)mi->MemTotal, si.totalram);
+
+	err += copy_to_struct((void __user*)mi->MemFree, si.freeram);
+	err += copy_to_struct((void __user*)mi->Buffers, si.bufferram);
+	err += copy_to_struct((void __user*)mi->HighTotal, si.totalhigh);
+	err += copy_to_struct((void __user*)mi->HighFree, si.freehigh);
+	err += copy_to_struct((void __user*)mi->LowTotal, si.totalram - si.totalhigh);
+	err += copy_to_struct((void __user*)mi->LowFree, si.freeram - si.freehigh);
+	err += copy_to_struct((void __user*)mi->SwapTotal, si.totalswap);
+	err += copy_to_struct((void __user*)mi->SwapFree, si.freeswap);
+
+	if (err)
+		p->err = -1;
+
+
+	kref_put(&p->refcount, list_remove_work);
+
+	if (p->synchro) {
+		fg_flag = 1;
+		wake_up_interruptible(&waiter);
+	} else {
+		ioctl_flag = 1;
+		wake_up_interruptible(&waiter);
+	}
+*/
+}
+
+static void modinfo_handler(struct work_struct *w)
+{
+	int i, len, count, err=0;
+	char *buffer, v[32];
+	struct module *m;
+	struct kshell_struct *p;
+	struct common *cp;
+
+	count = 0;
+	p = container_of(w, struct kshell_struct, work);
+	cp = (struct common *)p->user_datap;
+
+	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
+	if (!buffer) {
+		p->err = -ENOMEM;
+		goto out;
+	}
+
+	err += __get_user(len, (int __user *)&cp->len);
+
+	err += copy_from_user((void *)v, (void __user *)cp->name, len);
+	if (err)
+		pr_info("[  kshell_MODINFO ]  ERROR.\n");
+
+	/*
+	 * From module.h#L305
+	 * Search for module by name, must hold module_mutex.
+	 */
+
+	mutex_lock(&module_mutex);
+	m = find_module(v);
+	mutex_unlock(&module_mutex);
+
+	if (!m) {
+		p->err = -1;
+		goto out;
+	}
+
+	/*
+	 * Because module functions can be called even in the GOING state until
+	 * m->exit() finishes.
+	 *
+	 * klp_alive field is not always defined.
+	 */
+	#ifdef CONFIG_LIVEPATCH
+		if (!m->klp_alive) {
+			p->err = -1;
+			goto return_0;
+		}
+	#endif
+
+	len = scnprintf(v, sizeof(v), "name:\t%s\n", m->name);
+	strncat(buffer, v, len);
+	count += len;
+
+	len = scnprintf(v, sizeof(v), "version:\t%s\n", m->version);
+	strncat(buffer, v, len);
+	count += len;
+
+	len = scnprintf(v, sizeof(v), "adresse:\t%p\n", &m);
+	strncat(buffer, v, len);
+	count += len;
+
+	for(i = 0; i < m->num_kp; i++) {
+		len = scnprintf(v, sizeof(v), "param:\t%s\n", m->kp[i].name);
+		strncat(buffer, v, len);
+		count += len;
+	}
+
+	p->private_data = buffer;
+	p->private_data_len = count;
+
+out:
+	kref_put(&p->refcount, list_remove_work);
+
+	if (p->synchro) {
+		p->fg_flag = 1;
+		wake_up_interruptible(&waiter);
+	}
+
+	else {
+		p->ioctl_flag = 1;
+		wake_up_interruptible(&waiter);
+	}
+}
+
+static int find_cmd_id(void)
+{
+	int i;
+
+	mutex_lock(&id_mutex);
+	for (i = 0; i < MAX_CMD_ID; i++)
+		if (cmd_id[i] == 0)
+			break;
+
+	cmd_id[i] = 1;
+	mutex_unlock(&id_mutex);
+
+	return i+1;
+}
 
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
+	int err = 0;
+	bool need_wait = false;
 	struct kshell_struct *s;
 
 	/*
-	 * extracts the type and number bitfields, and don't decode
-	 * wrong CMDs: return -ENOTTY (Inappriopariate ioctl) before switching.
-	*/
+	 * extracts the type and number bitfields, and don't decode wrong CMDs:
+	 * return -ENOTTY (Inappriopariate ioctl) before switching.
+	 */
+
 	if (_IOC_TYPE(cmd) != KSHELL_IOC_MAGIC)
 		return -ENOTTY;
 	if (_IOC_NR(cmd) > KSHELL_IOC_MODINFO)
 		return -ENOTTY;
 
-	s = kmalloc(sizeof(s), GFP_KERNEL);
-	if (!s)
+	/*
+	 * From ioctl-number.txt
+	 *
+	 * The direction is a bitmask, and VERITY_WRITE catches R/W transferts,
+	 * `Type` is user-oriented, while access_ok is kernel oriented, so the
+	 *  concept of `read` and `write` is reversed.
+	 *
+	 *
+	 * From <asm/uaccess.h>L#197|L#205
+	 *
+	 * access_ok will be checked by copy_*_user, but we want be sure that
+	 * it will success before switching.
+	 */
+
+	if (_IOC_DIR(cmd) & _IOC_READ)
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+	if (_IOC_DIR(cmd) & _IOC_WRITE)
+		err = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+	if (err)
+		return -EFAULT;
+
+
+	s = kmem_cache_alloc(kshell_struct_cachep, GFP_KERNEL);
+	if (unlikely(!s))
 		return -ENOMEM;
 
-	spin_lock(&id_lock);
-	cmd_id += 1;
-	s->cmd_id = cmd_id;
-	spin_unlock(&id_lock);
-
-	s->data = (void *)arg;
+	s->err = 0;
+	s->cmd_id = 0;
+	s->fg_flag = 0;
+	s->ioctl_flag = 0;
+	s->fg_ed = false;
+	s->synchro = false;
+	s->cmd_id = find_cmd_id();
+	s->user_datap = (void *)arg;
+	s->ubuffer_size = 64;
+	kref_init(&s->refcount);
 
 	switch (cmd) {
-	case KSHELL_IOC_TEST:
-		break;
+	case SSHELL_IOC_LIST:
+		s->synchro = true;
 
 	case KSHELL_IOC_LIST:
 		s->cmd = list;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
+	case KSHELL_IOC_SETFG:
+		kmem_cache_free(kshell_struct_cachep, s);
+		copy_from_user((void *)&fg_cmd, (void __user *) arg, sizeof(int));
+		return 0;
+
 	case KSHELL_IOC_FG:
 		s->cmd = fg;
-		INIT_WORK(&s->work, list_handler);
+
+		/*
+		 * Set `fg_ed` to protect this cmd to be fg_ed by another `fg`
+		 * from another terminal.
+		 */
+		s->fg_ed = true;
+
+		s->cmd_id = fg_cmd;
+		INIT_WORK(&s->work, fg_handler);
 		break;
+
+	case SSHELL_IOC_KILL:
+		s->synchro = true;
 
 	case KSHELL_IOC_KILL:
 		s->cmd = kill;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
+	case SSHELL_IOC_WAIT:
+		s->synchro = true;
+
 	case KSHELL_IOC_WAIT:
 		s->cmd = wait;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
+	case SSHELL_IOC_MEMINFO:
+		s->synchro = true;
+
 	case KSHELL_IOC_MEMINFO:
 		s->cmd = meminfo;
-		INIT_WORK(&s->work, list_handler);
+		INIT_WORK(&s->work, meminfo_handler);
 		break;
+
+	case SSHELL_IOC_MODINFO:
+		s->synchro = true;
 
 	case KSHELL_IOC_MODINFO:
 		s->cmd = modinfo;
-		INIT_WORK(&s->work, list_handler);
+		INIT_WORK(&s->work, modinfo_handler);
 		break;
 
 	default: /* redudant, as cmd was checked before !*/
-		pr_info("[  kshell_ioctl ]  ERROR.\n");
-		kfree(s);
+		pr_info("[  kshell_ioctl_default ]  ERROR.\n");
+		kmem_cache_free(kshell_struct_cachep, s);
 		return -ENOTTY;
 	}
 
-	add_work(s);
+	/*
+	 * We prepar a reference for `fg` - (see fg_handler)
+	 */
+	if(s->synchro)
+		kref_get(&s->refcount);
+	else
+		need_wait = true;
+
+	kref_get(&s->refcount);	
+	list_add_work(s);
 	schedule_work(&s->work);
 
-	return 0;
+	if (need_wait)
+		wait_event_interruptible(waiter, s->ioctl_flag != 0);
+
+	kref_put(&s->refcount, list_remove_work);
+
+	return ioctl_err;
 }
 
 const struct file_operations kshell_fops = {
 	.unlocked_ioctl = kshell_ioctl
 };
 
-/*
-static void test(void)
-{
-	struct kshell_struct *s;
-
-	s  = kmalloc(sizeof(s), GFP_KERNEL);
-	s->cmd = wait;
-
-	add_work(s);
-	list_handler();
-	remove_work(s);
-}
-*/
-
 static int __init hello_init(void)
 {
+	/* NOTE: `SLAB_PANIC` causes the slab layer to panic if the allocation
+	 * fails. This flag is useful when the allocation must not fail.
+	 * ^see slab.h^ 
+	 *
+	 * As result, the return value is not checked for NULL. 
+	 */
+	kshell_struct_cachep = KMEM_CACHE(kshell_struct, SLAB_PANIC);
+
 	major = register_chrdev(0, "kshell", &kshell_fops);
 	if (major < 0) {
 		pr_info("[  kshell  ]  Module loading failed.\n");
 		pr_info("[  kshell  ]  register_chrdev() reurned %d.\n", major);
-		goto out;
+		goto out_kmem_destroy;
 	}
 
-	/* We start by using the default
-	 * Linux kernel worqueues
-	 */
 	kshell_wq = create_workqueue("kshell");
 	if (!kshell_wq)
 		goto out_unregister;
 
-
+	mutex_init(&id_mutex);
 	pr_info("[  kshell  ]  Module loaded successfully\n");
-	/* Test and remove the "not used warning
-	test();*/
 	goto out;
-
 
 out_unregister:
 	unregister_chrdev(major, "kshell");
-
+out_kmem_destroy:
+	kmem_cache_destroy(kshell_struct_cachep);
 out:
 	return 0;
 }
@@ -214,6 +584,9 @@ static void __exit hello_exit(void)
 {
 	flush_workqueue(kshell_wq);
 	destroy_workqueue(kshell_wq);
+
+	kmem_cache_destroy(kshell_struct_cachep);
+
 	unregister_chrdev(major, "kshell");
 	pr_info("[  kshell  ]  Module unloaded successfully\n");
 }
