@@ -7,13 +7,8 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION("1");
 
 static int major;
-/* data transfer wait condition */
-//static int cp_flag;
-/* fg wait condition */
-static int fg_flag;
-static int fg_cmd;
 
-/* ioctl wait condition */
+/* ioctl stuffs */
 static int ioctl_flag;
 static int ioctl_err;
 
@@ -37,8 +32,11 @@ struct kshell_struct {
 	int ubuffer_size;
 	int cmd_id;
 
-	int fg_flag;
 	int ioctl_flag;
+	int fg_flag;
+
+	/* [tmp] Let `fg` to reset this cmd_id */
+	int fg_ed_cmd_id;
 
 	/* Set this when wou put a synchro cmd tp the wq */
 	bool synchro;
@@ -93,9 +91,13 @@ static void list_remove_work(struct kref *ref)
 	}
 */
 
-	/* We need to reset cmd_id */
+	/* We need to reset cmd_id(s) */
 	mutex_lock(&id_mutex);
+
 	cmd_id[p->cmd_id - 1] = 0;
+	if (p->fg_ed_cmd_id != 0)
+		cmd_id[p->fg_ed_cmd_id - 1] = 0;
+
 	mutex_unlock(&id_mutex);
 
 	/* Error transfer - from wq to ioctl and then to user space */
@@ -112,13 +114,20 @@ static void list_add_work(struct kshell_struct *w)
 
 static void fg_handler(struct work_struct *w)
 {
-	int cmd_id;
+	int cmd_id, err;
 	bool found = false;
+	struct common *cp;
 	struct kshell_struct *p, *ip;
 	DEFINE_WAIT(inq);
 
 	p = container_of(w, struct kshell_struct, work);
-	cmd_id = *(int *)p->user_datap;
+	cp = (struct common *)p->user_datap;
+
+	err = __get_user(cmd_id, (int __user *)&cp->cmd_id);
+	if (err) {
+		p->err = -EFAULT;
+		goto out;
+	}
 
 	spin_lock(&kc_lock);
 	list_for_each_entry(ip, &kshell_cmd_list, list) {
@@ -129,11 +138,6 @@ static void fg_handler(struct work_struct *w)
 			 */
 			found = true;
 			ip->fg_ed = true;
-
-			/* we are going to clone ourselfs to this job */
-			ip->user_datap = p->user_datap;
-			list_del(&p->list);
-			kmem_cache_free(kshell_struct_cachep, p);
 			break;
 		}
 	}
@@ -144,14 +148,23 @@ static void fg_handler(struct work_struct *w)
 		p->err = -1;
 		goto out;
 	}
-  
+
 	prepare_to_wait(&waiter, &inq, TASK_INTERRUPTIBLE);
-	if (p->fg_flag == 0)
+	if (ip->fg_flag == 0)
 		schedule();
 	finish_wait(&waiter, &inq);
 
-	p = ip;
-	p->fg_flag = 0;
+	p->fg_ed_cmd_id = cmd_id;
+	p->private_data = ip->private_data;
+	p->private_data_len = ip->private_data_len;
+
+	/* We are responsible to remove this job from the cmd_list */
+	spin_lock(&kc_lock);
+	list_del(&ip->list);
+	spin_unlock(&kc_lock);
+
+	kmem_cache_free(kshell_struct_cachep, ip);
+
 out:
 	p->ioctl_flag = 1;
 	kref_put(&p->refcount, list_remove_work);
@@ -235,7 +248,7 @@ out:
 	wake_up_interruptible(&waiter);
 
         if (p->synchro) {
-                fg_flag = 1;
+                p->fg_flag = 1;
                 wake_up_interruptible(&waiter);
         }
 
@@ -407,7 +420,6 @@ static int find_cmd_id(void)
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
 	int err = 0;
-	bool need_wait = false;
 	struct kshell_struct *s;
 
 	/*
@@ -447,9 +459,9 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		return -ENOMEM;
 
 	s->err = 0;
-	s->cmd_id = 0;
 	s->fg_flag = 0;
 	s->ioctl_flag = 0;
+	s->fg_ed_cmd_id = 0;
 	s->fg_ed = false;
 	s->synchro = false;
 	s->cmd_id = find_cmd_id();
@@ -466,21 +478,13 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case KSHELL_IOC_SETFG:
-		kmem_cache_free(kshell_struct_cachep, s);
-		copy_from_user((void *)&fg_cmd, (void __user *) arg, sizeof(int));
-		return 0;
-
 	case KSHELL_IOC_FG:
 		s->cmd = fg;
-
 		/*
 		 * Set `fg_ed` to protect this cmd to be fg_ed by another `fg`
 		 * from another terminal.
 		 */
 		s->fg_ed = true;
-
-		s->cmd_id = fg_cmd;
 		INIT_WORK(&s->work, fg_handler);
 		break;
 
@@ -527,18 +531,15 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	 */
 	if(s->synchro)
 		kref_get(&s->refcount);
-	else
-		need_wait = true;
 
-	kref_get(&s->refcount);	
+	kref_get(&s->refcount);
 	list_add_work(s);
 	schedule_work(&s->work);
 
-	if (need_wait)
+	if (!s->synchro)
 		wait_event_interruptible(waiter, s->ioctl_flag != 0);
 
 	kref_put(&s->refcount, list_remove_work);
-
 	return ioctl_err;
 }
 
