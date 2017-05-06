@@ -469,7 +469,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 
 	if (_IOC_TYPE(cmd) != KSHELL_IOC_MAGIC)
 		return -ENOTTY;
-	if (_IOC_NR(cmd) > KSHELL_IOC_MODINFO)
+	if (_IOC_NR(cmd) > SYNC_IOC_MODINFO)
 		return -ENOTTY;
 
 	/*
@@ -504,15 +504,15 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	kref_init(&s->refcount);
 
 	switch (cmd) {
-	case SSHELL_IOC_LIST:
+	case ASYNC_IOC_LIST:
 		s->synchro = true;
 
-	case KSHELL_IOC_LIST:
+	case SYNC_IOC_LIST:
 		s->cmd = list;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case KSHELL_IOC_FG:
+	case SYNC_IOC_FG:
 		s->cmd = fg;
 		/*
 		 * Set `fg_ed` to protect this cmd to be fg_ed by another `fg`
@@ -522,34 +522,34 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		INIT_WORK(&s->work, fg_handler);
 		break;
 
-	case SSHELL_IOC_KILL:
+	case ASYNC_IOC_KILL:
 		s->synchro = true;
 
-	case KSHELL_IOC_KILL:
+	case SYNC_IOC_KILL:
 		s->cmd = kill;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case SSHELL_IOC_WAIT:
+	case ASYNC_IOC_WAIT:
 		s->synchro = true;
 
-	case KSHELL_IOC_WAIT:
+	case SYNC_IOC_WAIT:
 		s->cmd = wait;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case SSHELL_IOC_MEMINFO:
+	case ASYNC_IOC_MEMINFO:
 		s->synchro = true;
 
-	case KSHELL_IOC_MEMINFO:
+	case SYNC_IOC_MEMINFO:
 		s->cmd = meminfo;
 		INIT_WORK(&s->work, meminfo_handler);
 		break;
 
-	case SSHELL_IOC_MODINFO:
+	case ASYNC_IOC_MODINFO:
 		s->synchro = true;
 
-	case KSHELL_IOC_MODINFO:
+	case SYNC_IOC_MODINFO:
 		s->cmd = modinfo;
 		INIT_WORK(&s->work, modinfo_handler);
 		break;
