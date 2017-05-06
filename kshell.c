@@ -29,7 +29,6 @@ struct kshell_struct {
 	void *user_datap;
 
 	int private_data_len;
-	int ubuffer_size;
 	int cmd_id;
 
 	int ioctl_flag;
@@ -58,38 +57,59 @@ static struct workqueue_struct *kshell_wq;
 
 static void list_remove_work(struct kref *ref)
 {
+	int stop = 0, to_copy;
+	void __user *to_i, *to_p;
+	const void *from_i, *from_p;
+
 	struct kshell_struct *p = container_of(ref, struct kshell_struct,
 								refcount);
 
-	struct common *cp = (struct common *)p->user_datap;
+	struct common *up = (struct common *)p->user_datap;
 
-	spin_lock(&kc_lock);
-	list_del(&p->list);
-	spin_unlock(&kc_lock);
+	if (p->private_data_len < USER_BUFFER_SIZE) {
+		spin_lock(&kc_lock);
+		list_del(&p->list);
+		spin_unlock(&kc_lock);
+	}
 
 	/*
-	 * Data transfer - from kernel to user space.
+	 * Data Transfer - from kernel to user space.
+	 *
+	 * This is the kshell pipe implementation, it's main porpose is to
+	 * facilate data transfer from kernel to user space when data length
+	 * 
+	 * The idea here is to 
+	 *
 	 * Don't transfer/continue if p->err was set previously.
 	 */
 
-	if(!p->err)
-		p->err = copy_to_user((void *)cp->buffer, p->private_data, p->private_data_len);
+	to_i = &up->pipe_id;
+	from_i = &p->cmd_id;
 
-/*
-	while (!p->err && offset < p->private_data_len) {
-		offset += to_copy;
-		to_copy = min(p->private_data_len - offset, p->ubuffer_size);
-		p->err = copy_to_user((void *)cp->buffer, p->private_data + offset, to_copy);
+	to_p = up->buffer;
+	from_p = p->private_data;
 
-		if (to_copy < p->private_data_len) {
-			ioctl_flag = 1;
-			wake_up_interruptible(&waiter);
+	if(!p->err) {
+		to_copy = min(USER_BUFFER_SIZE -1 , p->private_data_len);
 
-			wait_event_interruptible(waiter, cp_flag != 0);
-			cp_flag = 0;
+		p->err += copy_to_user(to_p, from_p, to_copy);
+		p->err += copy_to_user(to_i, from_i, sizeof(int));
+
+		p->private_data_len -= to_copy;
+		p->private_data += to_copy;
+
+		if (!p->err && p->private_data_len > 0) {
+
+			if (p->fg_ed_cmd_id != 0)
+				cmd_id[p->fg_ed_cmd_id - 1] = 0;
+
+			p->fg_flag = true;
+			p->fg_ed = false;
+			return;
 		}
+
+		p->err += copy_to_user(to_i, (const void *)&stop, sizeof(int));
 	}
-*/
 
 	/* We need to reset cmd_id(s) */
 	mutex_lock(&id_mutex);
@@ -100,7 +120,7 @@ static void list_remove_work(struct kref *ref)
 
 	mutex_unlock(&id_mutex);
 
-	/* Error transfer - from wq to ioctl and then to user space */
+	/* Error transfer - from kernel to user space */
 	ioctl_err = p->err;
 	kmem_cache_free(kshell_struct_cachep, p);
 }
@@ -112,13 +132,32 @@ static void list_add_work(struct kshell_struct *w)
 	spin_unlock(&kc_lock);
 }
 
+static void reset_handler(void)
+{
+	struct kshell_struct *p, *next;
+
+	flush_workqueue(kshell_wq);
+
+	spin_lock(&kc_lock);
+	list_for_each_entry_safe(p, next, &kshell_cmd_list, list) {
+		list_del(&p->list);
+
+		cmd_id[p->cmd_id - 1] = 0;
+
+		if(p->private_data_len)
+			kfree(p->private_data);
+
+		kmem_cache_free(kshell_struct_cachep, p);
+	}
+	spin_unlock(&kc_lock);
+}
+
 static void fg_handler(struct work_struct *w)
 {
 	int cmd_id, err;
 	bool found = false;
 	struct common *cp;
 	struct kshell_struct *p, *ip;
-	DEFINE_WAIT(inq);
 
 	p = container_of(w, struct kshell_struct, work);
 	cp = (struct common *)p->user_datap;
@@ -132,10 +171,12 @@ static void fg_handler(struct work_struct *w)
 	spin_lock(&kc_lock);
 	list_for_each_entry(ip, &kshell_cmd_list, list) {
 		if (ip->cmd_id == cmd_id && !ip->fg_ed) {
+
 			/*
 			 * Recall, we have already a reference to this job.
 			 * check it out at kshell_ioctl.
 			 */
+
 			found = true;
 			ip->fg_ed = true;
 			break;
@@ -145,14 +186,14 @@ static void fg_handler(struct work_struct *w)
 
 	/* Job don't exist - still `fg` */
 	if (!found) {
+
 		p->err = -1;
 		goto out;
 	}
 
-	prepare_to_wait(&waiter, &inq, TASK_INTERRUPTIBLE);
-	if (ip->fg_flag == 0)
-		schedule();
-	finish_wait(&waiter, &inq);
+	/* Protect ourselves from -ERESTARTSYS*/
+	while (wait_event_interruptible(waiter, ip->fg_flag != 0))
+		;
 
 	p->fg_ed_cmd_id = cmd_id;
 	p->private_data = ip->private_data;
@@ -394,14 +435,13 @@ out:
 	if (p->synchro) {
 		p->fg_flag = 1;
 		wake_up_interruptible(&waiter);
-	}
-
-	else {
+	} else {
 		p->ioctl_flag = 1;
 		wake_up_interruptible(&waiter);
 	}
 }
 
+/*TODO : Handle MAX_CMD_ID limit*/
 static int find_cmd_id(void)
 {
 	int i;
@@ -461,7 +501,6 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	memset(s, '\0', sizeof(struct kshell_struct));
 	s->cmd_id = find_cmd_id();
 	s->user_datap = (void *)arg;
-	s->ubuffer_size = 64;
 	kref_init(&s->refcount);
 
 	switch (cmd) {
@@ -515,24 +554,30 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		INIT_WORK(&s->work, modinfo_handler);
 		break;
 
+	case KSHELL_IOC_RESET:
+		reset_handler();
+		return 0;
+
 	default: /* redudant, as cmd was checked before !*/
 		pr_info("[  kshell_ioctl_default ]  ERROR.\n");
 		kmem_cache_free(kshell_struct_cachep, s);
 		return -ENOTTY;
 	}
 
-	/*
-	 * We prepar a reference for `fg` - (see fg_handler)
-	 */
+	/*  Get a reference for the `fg` which reclaim this job - see fg_handler */
 	if(s->synchro)
 		kref_get(&s->refcount);
 
+	/* Get a reference for the thread worker */
 	kref_get(&s->refcount);
+
 	list_add_work(s);
 	schedule_work(&s->work);
 
 	if (!s->synchro)
-		wait_event_interruptible(waiter, s->ioctl_flag != 0);
+		/* Protect ourselves from -ERESTARTSYS */
+		while (wait_event_interruptible(waiter, s->ioctl_flag != 0))
+			;
 
 	kref_put(&s->refcount, list_remove_work);
 	return ioctl_err;
@@ -578,7 +623,7 @@ module_init(hello_init);
 
 static void __exit hello_exit(void)
 {
-	flush_workqueue(kshell_wq);
+	reset_handler();
 	destroy_workqueue(kshell_wq);
 
 	kmem_cache_destroy(kshell_struct_cachep);
