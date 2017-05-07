@@ -11,7 +11,9 @@ static int major;
 /* ioctl stuffs */
 static int ioctl_err;
 
+/* cmd_id management */
 static int cmd_id[MAX_CMD_ID] = {0};
+static int max_id_reached; /* increment this when MAX_CMD_ID reached */
 static struct mutex id_mutex;
 
 static struct kmem_cache *kshell_struct_cachep;
@@ -58,6 +60,54 @@ static DECLARE_WAIT_QUEUE_HEAD(waiter);
 
 static struct workqueue_struct *kshell_wq;
 
+/*
+ * find_cmd_id - find and return an unique id.
+ */
+static int find_cmd_id(void)
+{
+	int i, ret;
+
+	mutex_lock(&id_mutex);
+	for (i = 0; i < MAX_CMD_ID; i++)
+		if (cmd_id[i] == 0)
+			break;
+
+	/*
+	 * code become more easy when we don't
+	 * use the last case
+	 */
+	if (i < MAX_CMD_ID - 1) {
+		cmd_id[i] = 1;
+		mutex_unlock(&id_mutex);
+		return i + 1;
+	}
+
+	max_id_reached += 1;
+	ret = max_id_reached;
+	mutex_unlock(&id_mutex);
+
+	return (i + ret);
+}
+
+/*
+ * reset_cmd_id - reset up two pre-assigned cmd_id(s),
+ * @a may be the caller cmd_id.
+ * @b may be the fg_ed_cmd_id, (see fg_handler).
+ *
+ */
+static void reset_cmd_id(int a, int b)
+{
+	mutex_lock(&id_mutex);
+	if (a < MAX_CMD_ID)
+		cmd_id[a - 1] = 0;
+	
+	if (b != 0)
+		if (b < MAX_CMD_ID)
+			cmd_id[b - 1] = 0;
+	mutex_unlock(&id_mutex);
+
+}
+
 static struct kshell_struct *pool_alloc_entry(void)
 {
 	struct kshell_struct *entry = NULL;
@@ -78,12 +128,7 @@ static struct kshell_struct *pool_alloc_entry(void)
 
 static void pool_add_entry(struct kshell_struct *p)
 {
-	/* reset cmd_id(s) */
-	mutex_lock(&id_mutex);
-	cmd_id[p->cmd_id - 1] = 0;
-	if (unlikely(p->fg_ed_cmd_id != 0))
-		cmd_id[p->fg_ed_cmd_id - 1] = 0;
-	mutex_unlock(&id_mutex);
+	reset_cmd_id(p->cmd_id, p->fg_ed_cmd_id);
 
 	mutex_lock(&kp_mutex);
 	list_add(&p->list, &k_pool);
@@ -167,7 +212,7 @@ static void list_remove_work(struct kref *ref)
 	to_p = up->buffer;
 	from_p = p->private_data;
 
-	if(!p->err) {
+	if(!p->err && p->private_data_len) {
 		to_copy = min(USER_BUFFER_SIZE - 1 , p->private_data_len);
 
 		/* data_transfer */
@@ -179,7 +224,7 @@ static void list_remove_work(struct kref *ref)
 
 		if (!p->err && p->private_data_len > 0) {
 
-			/* pipe_id = cmd_id */
+			/* pipe_id = cmd_id, a new one in each iteration */
 			p->err += copy_to_user(to_i, from_i, sizeof(int));
 
 			/* cmd_id management, - see fg_handler */
@@ -209,6 +254,7 @@ static void list_remove_work(struct kref *ref)
 	/* Error transfer - from wq to user space */
 	ioctl_err = p->err;
 
+	/* From kshell_cmd_list to kshell_pool */
 	pool_add_entry(p);
 }
 
@@ -229,13 +275,9 @@ static void reset_handler(void)
 	list_for_each_entry_safe(p, next, &kshell_cmd_list, list) {
 		list_del(&p->list);
 
-		cmd_id[p->cmd_id - 1] = 0;
-		/* true when user space crashed before EOT */
-		if (unlikely(p->fg_ed_cmd_id != 0))
-			cmd_id[p->fg_ed_cmd_id - 1] = 0;
-		if (!p->err)
+		reset_cmd_id(p->cmd_id, p->fg_ed_cmd_id);
+		if(!p->err && p->private_data_len)
 			kfree(p->private_data);
-
 		kmem_cache_free(kshell_struct_cachep, p);
 	}
 	spin_unlock(&kc_lock);
@@ -521,22 +563,6 @@ out:
 		p->ioctl_cond = 1;
 		wake_up_interruptible(&waiter);
 	}
-}
-
-/*TODO : Handle MAX_CMD_ID limit*/
-static int find_cmd_id(void)
-{
-	int i;
-
-	mutex_lock(&id_mutex);
-	for (i = 0; i < MAX_CMD_ID; i++)
-		if (cmd_id[i] == 0)
-			break;
-
-	cmd_id[i] = 1;
-	mutex_unlock(&id_mutex);
-
-	return i+1;
 }
 
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
