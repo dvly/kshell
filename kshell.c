@@ -30,14 +30,14 @@ struct kshell_struct {
 	int private_data_len;
 	int cmd_id;
 
-	int ioctl_flag;
-	int fg_flag;
+	int ioctl_cond;
+	int fg_cond;
 
 	/* when `fg` reclaim an asynchro cmd, set this to it's cmd_id */
 	int fg_ed_cmd_id;
 
-	/* Set this when wou put a synchro cmd tp the wq */
-	bool synchro;
+	/* Set this when wou put a asynchro cmd tp the wq */
+	bool asynchro;
 
 	/* Set this when `fg` found its job */
 	bool fg_ed;
@@ -90,7 +90,7 @@ static void pool_add_entry(struct kshell_struct *p)
 	mutex_unlock(&kp_mutex);
 }
 
-/* Exclusively used by `fg` to put it's reference of the cmd it reclaim */
+/* Exclusively used by `fg` to put it's reference of the cmd it reclaims */
 static void kref_ed_entry(struct kref *ref)
 {
 	struct kshell_struct *p;
@@ -190,7 +190,7 @@ static void list_remove_work(struct kref *ref)
 			kref_get(ref);
 
 			/* FINISHED asynchronous cmd */
-			p->fg_flag = true;
+			p->fg_cond = true;
 
 			/* this `cmd` can be reclaimed by `fg` */
 			p->fg_ed = false;
@@ -287,7 +287,7 @@ static void fg_handler(struct work_struct *w)
 	}
 
 	/* Protect ourselves from -ERESTARTSYS*/
-	while (wait_event_interruptible(waiter, ip->fg_flag != 0))
+	while (wait_event_interruptible(waiter, ip->fg_cond != 0))
 		;
 
 	/* after this, `fg` will looks as ip->cmd */
@@ -299,7 +299,7 @@ static void fg_handler(struct work_struct *w)
 	kref_put(&ip->refcount, kref_ed_entry);
 
 out:
-	p->ioctl_flag = 1;
+	p->ioctl_cond = 1;
 	kref_put(&p->refcount, list_remove_work);
 	wake_up_interruptible(&waiter);
 }
@@ -371,7 +371,7 @@ static void list_handler(struct work_struct *w)
 	p->private_data = buffer;
 	p->private_data_len = count;
 out:
-	p->ioctl_flag = 1;
+	p->ioctl_cond = 1;
 	kref_put(&p->refcount, list_remove_work);
 	wake_up_interruptible(&waiter);
 }
@@ -424,11 +424,11 @@ static void meminfo_handler(struct work_struct *w)
 
 	kref_put(&p->refcount, list_remove_work);
 
-	if (p->synchro) {
-		fg_flag = 1;
+	if (p->asynchro) {
+		fg_cond = 1;
 		wake_up_interruptible(&waiter);
 	} else {
-		ioctl_flag = 1;
+		ioctl_cond = 1;
 		wake_up_interruptible(&waiter);
 	}
 */
@@ -514,11 +514,11 @@ static void modinfo_handler(struct work_struct *w)
 out:
 	kref_put(&p->refcount, list_remove_work);
 
-	if (p->synchro) {
-		p->fg_flag = 1;
+	if (p->asynchro) {
+		p->fg_cond = 1;
 		wake_up_interruptible(&waiter);
 	} else {
-		p->ioctl_flag = 1;
+		p->ioctl_cond = 1;
 		wake_up_interruptible(&waiter);
 	}
 }
@@ -606,7 +606,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		break;
 
 	case ASYNC_IOC_KILL:
-		s->synchro = true;
+		s->asynchro = true;
 
 	case SYNC_IOC_KILL:
 		s->cmd = kill;
@@ -614,7 +614,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		break;
 
 	case ASYNC_IOC_WAIT:
-		s->synchro = true;
+		s->asynchro = true;
 
 	case SYNC_IOC_WAIT:
 		s->cmd = wait;
@@ -622,7 +622,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		break;
 
 	case ASYNC_IOC_MEMINFO:
-		s->synchro = true;
+		s->asynchro = true;
 
 	case SYNC_IOC_MEMINFO:
 		s->cmd = meminfo;
@@ -630,7 +630,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		break;
 
 	case ASYNC_IOC_MODINFO:
-		s->synchro = true;
+		s->asynchro = true;
 
 	case SYNC_IOC_MODINFO:
 		s->cmd = modinfo;
@@ -650,7 +650,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	}
 
 	/*  Get a reference for the `fg` which reclaim this job - see fg_handler */
-	if(s->synchro)
+	if(s->asynchro)
 		kref_get(&s->refcount);
 
 	/* Get a reference for the thread worker */
@@ -659,9 +659,9 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	list_add_work(s);
 	schedule_work(&s->work);
 
-	if (!s->synchro)
+	if (!s->asynchro)
 		/* Protect ourselves from -ERESTARTSYS */
-		while (wait_event_interruptible(waiter, s->ioctl_flag != 0))
+		while (wait_event_interruptible(waiter, s->ioctl_cond != 0))
 			;
 
 	kref_put(&s->refcount, list_remove_work);
@@ -729,7 +729,7 @@ static void __exit hello_exit(void)
 	reset_handler();
 	
 	destroy_workqueue(kshell_wq);
-	unregister_shrinker(&ksell_shrinker);
+	unregister_shrinker(&kshell_shrinker);
 	kmem_cache_destroy(kshell_struct_cachep);
 
 	unregister_chrdev(major, "kshell");
