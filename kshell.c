@@ -478,7 +478,7 @@ static void meminfo_handler(struct work_struct *w)
 
 static void modinfo_handler(struct work_struct *w)
 {
-	int i, len, count, err=0;
+	int i, len, count, err;
 	char *buffer, v[32];
 	struct module *m;
 	struct kshell_struct *p;
@@ -494,8 +494,8 @@ static void modinfo_handler(struct work_struct *w)
 		goto out;
 	}
 
-	err += __get_user(len, (int __user *)&cp->len);
-
+	memset(v, '\0', sizeof(v));
+	err = __get_user(len, (int __user *)&cp->len);
 	err += copy_from_user((void *)v, (void __user *)cp->name, len);
 	if (err) {
 		pr_info("[  kshell_MODINFO ] error at copy_from_user.\n");
