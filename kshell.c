@@ -9,7 +9,6 @@ MODULE_VERSION("1");
 static int major;
 
 /* ioctl stuffs */
-static int ioctl_flag;
 static int ioctl_err;
 
 static int cmd_id[MAX_CMD_ID] = {0};
@@ -34,7 +33,7 @@ struct kshell_struct {
 	int ioctl_flag;
 	int fg_flag;
 
-	/* [tmp] Let `fg` to reset this cmd_id */
+	/* when `fg` reclaim an asynchro cmd, set this to it's cmd_id */
 	int fg_ed_cmd_id;
 
 	/* Set this when wou put a synchro cmd tp the wq */
@@ -51,36 +50,115 @@ struct kshell_struct {
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
 
+/* pool */
+static LIST_HEAD(k_pool);
+static struct mutex kp_mutex;
+
 static DECLARE_WAIT_QUEUE_HEAD(waiter);
 
 static struct workqueue_struct *kshell_wq;
 
+static struct kshell_struct *pool_alloc_entry(void)
+{
+	struct kshell_struct *entry = NULL;
+
+	mutex_lock(&kp_mutex);
+	if (!list_empty(&k_pool)) {
+		entry = container_of(k_pool.next, struct kshell_struct, list);
+		list_del(&entry->list);
+		mutex_unlock(&kp_mutex);
+
+		memset(entry, '\0', sizeof(struct kshell_struct));
+		kref_get(&entry->refcount);
+	} else
+		mutex_unlock(&kp_mutex);
+
+	return entry;
+}
+
+static void pool_add_entry(struct kshell_struct *p)
+{
+	/* reset cmd_id(s) */
+	mutex_lock(&id_mutex);
+	cmd_id[p->cmd_id - 1] = 0;
+	if (unlikely(p->fg_ed_cmd_id != 0))
+		cmd_id[p->fg_ed_cmd_id - 1] = 0;
+	mutex_unlock(&id_mutex);
+
+	mutex_lock(&kp_mutex);
+	list_add(&p->list, &k_pool);
+	mutex_unlock(&kp_mutex);
+}
+
+/* Exclusively used by `fg` to put it's reference of the cmd it reclaim */
+static void kref_ed_entry(struct kref *ref)
+{
+	struct kshell_struct *p;
+
+	p = container_of(ref, struct kshell_struct, refcount);
+
+	spin_lock(&kc_lock);
+	list_del(&p->list);
+	spin_unlock(&kc_lock);
+
+	pool_add_entry(p);
+}
+
+
+static unsigned long pool_count(struct shrinker *s, struct shrink_control *sc)
+{
+	int count = 0;
+	struct kshell_struct *p;
+
+	mutex_lock(&kp_mutex);
+	list_for_each_entry(p, &k_pool, list) {
+		count += 1;
+	}
+	mutex_unlock(&kp_mutex);
+
+	return count;
+}
+
+static unsigned long pool_scan(struct shrinker *s, struct shrink_control *sc)
+{
+	int count = 0;
+	struct kshell_struct *p, *next;
+
+	mutex_lock(&kp_mutex);
+	list_for_each_entry_safe(p, next, &k_pool, list) {
+		count += 1;
+		list_del(&p->list);
+		kmem_cache_free(kshell_struct_cachep, p);
+	}
+	mutex_unlock(&kp_mutex);
+
+	return count;
+}
+
 static void list_remove_work(struct kref *ref)
 {
-	int stop = 0, to_copy;
+	int to_copy, eot = 0;
 	void __user *to_i, *to_p;
 	const void *from_i, *from_p;
 
-	struct kshell_struct *p = container_of(ref, struct kshell_struct,
-								refcount);
+	struct common *up;
+	struct kshell_struct *p;
 
-	struct common *up = (struct common *)p->user_datap;
-
-	if (p->private_data_len < USER_BUFFER_SIZE) {
-		spin_lock(&kc_lock);
-		list_del(&p->list);
-		spin_unlock(&kc_lock);
-	}
+	p = container_of(ref, struct kshell_struct, refcount);
+	up = (struct common *)p->user_datap;
 
 	/*
-	 * Data Transfer - from kernel to user space.
-	 *
-	 * This is the kshell pipe implementation, it's main porpose is to
-	 * facilate data transfer from kernel to user space when data length
+	 * Kshell pipe - Data Transfer from kernel to user space.
 	 * 
-	 * The idea here is to 
+	 * The idea is quick simple; if can't transfer at once, transfer as
+	 * mush as possible, mark this job as a FINISHED asynchronous one and
+	 * return. User space responsability is then to reclaim the remaining
+	 * data using `fg <pipe_id>`,
 	 *
-	 * Don't transfer/continue if p->err was set previously.
+	 *
+	 * WARNING: DON'T TRANSFER IF p->err WAS SET PREVIOUSLY.
+	 * if allocated, p->private_data is freed as soon as p->err is set and
+	 * may be done in the workqueue.
 	 */
 
 	to_i = &up->pipe_id;
@@ -90,39 +168,48 @@ static void list_remove_work(struct kref *ref)
 	from_p = p->private_data;
 
 	if(!p->err) {
-		to_copy = min(USER_BUFFER_SIZE -1 , p->private_data_len);
+		to_copy = min(USER_BUFFER_SIZE - 1 , p->private_data_len);
 
+		/* data_transfer */
 		p->err += copy_to_user(to_p, from_p, to_copy);
-		p->err += copy_to_user(to_i, from_i, sizeof(int));
 
+		/* some parameterising.. */
 		p->private_data_len -= to_copy;
 		p->private_data += to_copy;
 
 		if (!p->err && p->private_data_len > 0) {
 
+			/* pipe_id = cmd_id */
+			p->err += copy_to_user(to_i, from_i, sizeof(int));
+
+			/* cmd_id management, - see fg_handler */
 			if (p->fg_ed_cmd_id != 0)
 				cmd_id[p->fg_ed_cmd_id - 1] = 0;
 
+			/* Because it's refcount was zeroed, as we are here. */
+			kref_get(ref);
+
+			/* FINISHED asynchronous cmd */
 			p->fg_flag = true;
+
+			/* this `cmd` can be reclaimed by `fg` */
 			p->fg_ed = false;
 			return;
 		}
 
-		p->err += copy_to_user(to_i, (const void *)&stop, sizeof(int));
+		/* EOT - End Of Transfer */
+		p->err += copy_to_user(to_i, (const void *)&eot, sizeof(int));
+		kfree(p->private_data);
 	}
 
-	/* We need to reset cmd_id(s) */
-	mutex_lock(&id_mutex);
+	spin_lock(&kc_lock);
+	list_del(&p->list);
+	spin_unlock(&kc_lock);
 
-	cmd_id[p->cmd_id - 1] = 0;
-	if (p->fg_ed_cmd_id != 0)
-		cmd_id[p->fg_ed_cmd_id - 1] = 0;
-
-	mutex_unlock(&id_mutex);
-
-	/* Error transfer - from kernel to user space */
+	/* Error transfer - from wq to user space */
 	ioctl_err = p->err;
-	kmem_cache_free(kshell_struct_cachep, p);
+
+	pool_add_entry(p);
 }
 
 static void list_add_work(struct kshell_struct *w)
@@ -143,13 +230,22 @@ static void reset_handler(void)
 		list_del(&p->list);
 
 		cmd_id[p->cmd_id - 1] = 0;
-
-		if(p->private_data_len)
+		/* true when user space crashed before EOT */
+		if (unlikely(p->fg_ed_cmd_id != 0))
+			cmd_id[p->fg_ed_cmd_id - 1] = 0;
+		if (!p->err)
 			kfree(p->private_data);
 
 		kmem_cache_free(kshell_struct_cachep, p);
 	}
 	spin_unlock(&kc_lock);
+
+	mutex_lock(&kp_mutex);
+	list_for_each_entry_safe(p, next, &k_pool, list) {
+		list_del(&p->list);
+		kmem_cache_free(kshell_struct_cachep, p);
+	}
+	mutex_unlock(&kp_mutex);
 }
 
 static void fg_handler(struct work_struct *w)
@@ -184,9 +280,8 @@ static void fg_handler(struct work_struct *w)
 	}
 	spin_unlock(&kc_lock);
 
-	/* Job don't exist - still `fg` */
+	/* Job not found */
 	if (!found) {
-
 		p->err = -1;
 		goto out;
 	}
@@ -195,16 +290,13 @@ static void fg_handler(struct work_struct *w)
 	while (wait_event_interruptible(waiter, ip->fg_flag != 0))
 		;
 
-	p->fg_ed_cmd_id = cmd_id;
+	/* after this, `fg` will looks as ip->cmd */
+	p->err = ip->err; /* happened errors in (ip->cmd)_handler */
+	p->fg_ed_cmd_id = cmd_id; /* == ip->cmd_id */
 	p->private_data = ip->private_data;
 	p->private_data_len = ip->private_data_len;
 
-	/* We are responsible to remove this job from the cmd_list */
-	spin_lock(&kc_lock);
-	list_del(&ip->list);
-	spin_unlock(&kc_lock);
-
-	kmem_cache_free(kshell_struct_cachep, ip);
+	kref_put(&ip->refcount, kref_ed_entry);
 
 out:
 	p->ioctl_flag = 1;
@@ -234,10 +326,6 @@ static void list_handler(struct work_struct *w)
 	list_for_each_entry(ip, &kshell_cmd_list, list) {
 
 		switch (ip->cmd) {
-		case list:
-			len = scnprintf(v, sizeof(v), "list\t%d\n", ip->cmd_id);
-			break;
-
 		case kill:
 			len = scnprintf(v, sizeof(v), "kill\t%d\n", ip->cmd_id);
 			break;
@@ -247,11 +335,11 @@ static void list_handler(struct work_struct *w)
 			break;
 
 		case meminfo:
-			len = scnprintf(v, sizeof(v), "minfo\t%d\n", ip->cmd_id);
+			len = scnprintf(v, sizeof(v), "meminfo\t%d\n", ip->cmd_id);
 			break;
 
 		case modinfo:
-			len = scnprintf(v, sizeof(v), "dinfo\t%d\n", ip->cmd_id);
+			len = scnprintf(v, sizeof(v), "modinfo\t%d\n", ip->cmd_id);
 			break;
 
 		default:
@@ -265,7 +353,7 @@ static void list_handler(struct work_struct *w)
 			buffer_realloc = buffer;
 
 			buffer = kmalloc(buffer_size, GFP_KERNEL);
-			if (!buffer_realloc) {
+			if (!buffer) {
 				kfree(buffer_realloc);
 				p->err = -ENOMEM;
 				goto out;
@@ -283,20 +371,9 @@ static void list_handler(struct work_struct *w)
 	p->private_data = buffer;
 	p->private_data_len = count;
 out:
-	/* wake up the sleeped thread */
+	p->ioctl_flag = 1;
 	kref_put(&p->refcount, list_remove_work);
-	ioctl_flag = 1;
 	wake_up_interruptible(&waiter);
-
-        if (p->synchro) {
-                p->fg_flag = 1;
-                wake_up_interruptible(&waiter);
-        }
-
-        else {
-                p->ioctl_flag = 1;
-                wake_up_interruptible(&waiter);
-	}
 }
 
 /*
@@ -368,7 +445,7 @@ static void modinfo_handler(struct work_struct *w)
 	count = 0;
 	p = container_of(w, struct kshell_struct, work);
 	cp = (struct common *)p->user_datap;
-
+	
 	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
 	if (!buffer) {
 		p->err = -ENOMEM;
@@ -378,8 +455,12 @@ static void modinfo_handler(struct work_struct *w)
 	err += __get_user(len, (int __user *)&cp->len);
 
 	err += copy_from_user((void *)v, (void __user *)cp->name, len);
-	if (err)
-		pr_info("[  kshell_MODINFO ]  ERROR.\n");
+	if (err) {
+		pr_info("[  kshell_MODINFO ] error at copy_from_user.\n");
+		kfree(buffer);
+		p->err = -EFAULT;
+		goto out;
+	}
 
 	/*
 	 * From module.h#L305
@@ -391,7 +472,8 @@ static void modinfo_handler(struct work_struct *w)
 	mutex_unlock(&module_mutex);
 
 	if (!m) {
-		p->err = -1;
+		kfree(buffer);
+		p->err = -2;
 		goto out;
 	}
 
@@ -399,12 +481,12 @@ static void modinfo_handler(struct work_struct *w)
 	 * Because module functions can be called even in the GOING state until
 	 * m->exit() finishes.
 	 *
-	 * klp_alive field is not always defined.
 	 */
 	#ifdef CONFIG_LIVEPATCH
 		if (!m->klp_alive) {
 			p->err = -1;
-			goto return_0;
+			kfree(buffer);
+			goto out;
 		}
 	#endif
 
@@ -469,7 +551,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 
 	if (_IOC_TYPE(cmd) != KSHELL_IOC_MAGIC)
 		return -ENOTTY;
-	if (_IOC_NR(cmd) > KSHELL_IOC_MODINFO)
+	if (_IOC_NR(cmd) > KSHELL_IOC_MAXNR)
 		return -ENOTTY;
 
 	/*
@@ -493,74 +575,77 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	if (err)
 		return -EFAULT;
 
+	s = pool_alloc_entry();
+	if (s == NULL) {
+		s = kmem_cache_alloc(kshell_struct_cachep, GFP_KERNEL);
+		if (unlikely(!s))
+			return -ENOMEM;
 
-	s = kmem_cache_alloc(kshell_struct_cachep, GFP_KERNEL);
-	if (unlikely(!s))
-		return -ENOMEM;
-
-	memset(s, '\0', sizeof(struct kshell_struct));
+		memset(s, '\0', sizeof(struct kshell_struct));
+		kref_init(&s->refcount);
+	} 
+	/* else `s` already memset_ed && kref_ed */
+	
 	s->cmd_id = find_cmd_id();
 	s->user_datap = (void *)arg;
-	kref_init(&s->refcount);
 
 	switch (cmd) {
-	case SSHELL_IOC_LIST:
-		s->synchro = true;
-
-	case KSHELL_IOC_LIST:
+	case SYNC_IOC_LIST:
 		s->cmd = list;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case KSHELL_IOC_FG:
+	case SYNC_IOC_FG:
 		s->cmd = fg;
 		/*
 		 * Set `fg_ed` to protect this cmd to be fg_ed by another `fg`
-		 * from another terminal.
+		 * from another terminal as our driver isn't a single openness.
 		 */
 		s->fg_ed = true;
 		INIT_WORK(&s->work, fg_handler);
 		break;
 
-	case SSHELL_IOC_KILL:
+	case ASYNC_IOC_KILL:
 		s->synchro = true;
 
-	case KSHELL_IOC_KILL:
+	case SYNC_IOC_KILL:
 		s->cmd = kill;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case SSHELL_IOC_WAIT:
+	case ASYNC_IOC_WAIT:
 		s->synchro = true;
 
-	case KSHELL_IOC_WAIT:
+	case SYNC_IOC_WAIT:
 		s->cmd = wait;
 		INIT_WORK(&s->work, list_handler);
 		break;
 
-	case SSHELL_IOC_MEMINFO:
+	case ASYNC_IOC_MEMINFO:
 		s->synchro = true;
 
-	case KSHELL_IOC_MEMINFO:
+	case SYNC_IOC_MEMINFO:
 		s->cmd = meminfo;
 		INIT_WORK(&s->work, meminfo_handler);
 		break;
 
-	case SSHELL_IOC_MODINFO:
+	case ASYNC_IOC_MODINFO:
 		s->synchro = true;
 
-	case KSHELL_IOC_MODINFO:
+	case SYNC_IOC_MODINFO:
 		s->cmd = modinfo;
 		INIT_WORK(&s->work, modinfo_handler);
 		break;
 
 	case KSHELL_IOC_RESET:
+		cmd_id[s->cmd_id - 1] = 0;
+		pool_add_entry(s);
 		reset_handler();
 		return 0;
 
 	default: /* redudant, as cmd was checked before !*/
-		pr_info("[  kshell_ioctl_default ]  ERROR.\n");
-		kmem_cache_free(kshell_struct_cachep, s);
+		cmd_id[s->cmd_id - 1] = 0;
+		pool_add_entry(s);
 		return -ENOTTY;
 	}
 
@@ -587,13 +672,21 @@ const struct file_operations kshell_fops = {
 	.unlocked_ioctl = kshell_ioctl
 };
 
+static struct shrinker kshell_shrinker = {
+	.count_objects = pool_count,
+	.scan_objects = pool_scan,
+	.seeks = DEFAULT_SEEKS,
+};
+
 static int __init hello_init(void)
 {
+	int err;
+
 	/* NOTE: `SLAB_PANIC` causes the slab layer to panic if the allocation
 	 * fails. This flag is useful when the allocation must not fail.
 	 * ^see slab.h^ 
 	 *
-	 * As result, the return value is not checked for NULL. 
+	 * As result, the return value is not checked for NULL.
 	 */
 	kshell_struct_cachep = KMEM_CACHE(kshell_struct, SLAB_PANIC);
 
@@ -608,24 +701,35 @@ static int __init hello_init(void)
 	if (!kshell_wq)
 		goto out_unregister;
 
+	err = register_shrinker(&kshell_shrinker);
+	if (err)
+		goto out_wq_destroy;
+
 	mutex_init(&id_mutex);
+	mutex_init(&kp_mutex);
+
 	pr_info("[  kshell  ]  Module loaded successfully\n");
-	goto out;
+	return 0;
+
+out_wq_destroy:
+	destroy_workqueue(kshell_wq);
 
 out_unregister:
 	unregister_chrdev(major, "kshell");
+
 out_kmem_destroy:
 	kmem_cache_destroy(kshell_struct_cachep);
-out:
-	return 0;
+
+	return -1;
 }
 module_init(hello_init);
 
 static void __exit hello_exit(void)
 {
 	reset_handler();
+	
 	destroy_workqueue(kshell_wq);
-
+	unregister_shrinker(&ksell_shrinker);
 	kmem_cache_destroy(kshell_struct_cachep);
 
 	unregister_chrdev(major, "kshell");

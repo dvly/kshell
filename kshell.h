@@ -16,6 +16,8 @@
 #include <asm/uaccess.h>		/* copy_*_user */
 #include <asm/page.h>			/* PAGE_SIZE */
 #include <linux/kref.h>			/* kref*/
+#include <linux/shrinker.h>
 #include <linux/spinlock.h>
+
 
 #define MAX_CMD_ID 100
