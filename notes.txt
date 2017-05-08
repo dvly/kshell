@@ -1,0 +1,9 @@
+ int kill_pid(struct pid *pid, int sig, int priv)
+ {
+         return kill_pid_info(sig, __si_special(priv), pid);
+ }
+ EXPORT_SYMBOL(kill_pid);
+
+Dans tous les exemples le dernier argument est egal a 1 
+
+workqueues = pool de thread, efficace pour des traitements asynchrones de courte duree
