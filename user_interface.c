@@ -119,13 +119,21 @@ int main(int argc, char *argv[]){
 		}
 		else if(strcmp(cmd_arg[0], "wait") == 0){
 			printf("wait\n");
-			if(nb_arg < 2)
-				goto ERRNBARG;
 			if(nb_arg > 2 && background){ 
-			/*TODO : Initialiser data*/
+				data.len = 0;
+				for(i = 1; i < nb_arg - 1; i++){
+					data.to_wait[data.len] =  atoi(cmd_arg[i]);
+					data.len++;
+				}
 				return_value = ioctl(fd, ASYNC_IOC_WAIT, (void*)&data);
 			}
 			else if(nb_arg >= 2){ 
+				data.len = 0;
+				for(i = 1; i < nb_arg; i++){
+					data.to_wait[data.len] =  atoi(cmd_arg[i]);
+					printf("pid : %d\n", data.to_wait[data.len]);
+					data.len++;
+				}
 				return_value = ioctl(fd, SYNC_IOC_WAIT, (void*)&data);
 			}
 			else

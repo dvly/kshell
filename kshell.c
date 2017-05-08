@@ -589,16 +589,20 @@ out:
 
 static void wait_handler(struct work_struct *w)
 {
-	int i;
-	int err;
-	int nr_pid;
+	int i, err, len, nr_pid;
 	int to_wait[10];
 	char *buffer;
-	struct task_pid **ts;
+	struct task_struct **ts;
 	struct common *cp;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
+	cp = (struct common *)p->user_datap;
+	ts = kmalloc(sizeof(struct task_struct *), GFP_KERNEL);
+	if (!ts) {
+		p->err = -ENOMEM;
+		goto out;
+	}
 
 	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
 	if (!buffer) {
@@ -616,18 +620,28 @@ static void wait_handler(struct work_struct *w)
 		goto out;
 	}
 
-	for (i = 0; i < nr_pid; i++)
-		ts[i] = pid_task(find_vpid(tmp_work->pb->pid[i]), PIDTYPE_PID);
+	for (i = 0; i < nr_pid; i++){
+		ts[i] = pid_task(find_vpid(to_wait[i]), PIDTYPE_PID);
+		if(ts[i] == NULL){
+			pr_info("[ WAIT ] pid not found\n");
+			p->err = -EFAULT;
+			goto out;
+		}
+	}
 
-	for(; ; i++)
-		if (ts[i % nr_pid]->stata > 0)
+	for(; ; i++){
+		if (ts[i % nr_pid]->state > 0){
+			pr_info("condition break\n");
 			break;
-
-	len = scnprintf(buffer, BUFF_SIZE, "[%d]", ts[i]->exit_code);
+		}
+		pr_info("Dans boucle du wait\n");
+	}
+	len = scnprintf(buffer, BUFF_SIZE, "[%d]", ts[i % nr_pid]->exit_code);
 
 	p->private_data = buffer;
-	p->private_data = len;
+	p->private_data_len = len;
 
+	pr_info("Avant out\n");
 out:
 	kref_put(&p->refcount, list_remove_work);
 
@@ -816,7 +830,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 
 	case SYNC_IOC_WAIT:
 		s->cmd = wait;
-		INIT_WORK(&s->work, list_handler);
+		INIT_WORK(&s->work, wait_handler);
 		break;
 
 	case ASYNC_IOC_MEMINFO:
