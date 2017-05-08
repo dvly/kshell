@@ -6,8 +6,6 @@ MODULE_AUTHOR("Sofiane IDRI - Davy LY, UPMC");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1");
 
-#define KB(num) num << (PAGE_SHIFT - 10)
-
 static int major;
 
 /* ioctl stuffs */
@@ -56,18 +54,18 @@ struct cmd_struct {
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
 
-/* 
- * k_pool est une liste contenant les cmd_struct des commandes 
+/*
+ * k_pool est une liste contenant les cmd_struct des commandes
  * qui ont finies d'être exécutées.
- * Cette liste évite de désallouer et réallouer des cmd_struct 
- * en permanance. Si une commande est appelée par l'utilisateur, 
- * et qu'il y a des cmd_struct disponibles dans le pool alors il 
- * nous suffit d'en reprendre un, la reinitialiser, puis la remettre 
+ * Cette liste évite de désallouer et réallouer des cmd_struct
+ * en permanance. Si une commande est appelée par l'utilisateur,
+ * et qu'il y a des cmd_struct disponibles dans le pool alors il
+ * nous suffit d'en reprendre une, la reinitialiser, puis la remettre
  * dans la liste des commandes actives : kshell_cmd_list.
  *
- * Par ailleurs lorsque le shrinker passe c'est les éléments qui sont présents dans
- * le k_pool qui sont déalloués.
- */
+ * Par ailleurs lorsque le shrinker passe c'est les éléments qui sont
+ * présents dans le k_pool qui sont désalloués.
+*/
 static LIST_HEAD(k_pool);
 static struct mutex kp_mutex;
 
@@ -76,7 +74,7 @@ static DECLARE_WAIT_QUEUE_HEAD(waiter);
 static struct workqueue_struct *kshell_wq;
 
 /*
- * find_cmd_id - cherche et retourne un id unique pour les commandes 
+ * find_cmd_id - cherche et retourne un id unique pour les commandes
  */
 static int find_cmd_id(void)
 {
@@ -115,7 +113,7 @@ static void reset_cmd_id(int a, int b)
 	mutex_lock(&id_mutex);
 	if (a < MAX_CMD_ID)
 		cmd_id[a - 1] = 0;
-	
+
 	if (b != 0)
 		if (b < MAX_CMD_ID)
 			cmd_id[b - 1] = 0;
@@ -124,9 +122,9 @@ static void reset_cmd_id(int a, int b)
 }
 
 /*
- * pool_alloc_entry - Retire un élément cmd_struct de la pool  
+ * pool_alloc_entry - Retire un élément cmd_struct de la pool
  *
- * @return : retourne le cmd_struct retiré 
+ * @return : retourne le cmd_struct retiré
  *
  */
 static struct cmd_struct *pool_alloc_entry(void)
@@ -155,9 +153,9 @@ static void pool_add_entry(struct cmd_struct *p)
 	mutex_unlock(&kp_mutex);
 }
 
-/* 
+/*
  * kref_ed_entry - Utilisée uniquement par fg, et concerne donc
- * des commandes en background. Cette fonction permet de retirer 
+ * des commandes en background. Cette fonction permet de retirer
  * un élément cmd_list de la liste des commandes actives : cmd_list.
  *
  * on utilise cette fonction plutôt que list_remove_work car
@@ -199,7 +197,7 @@ static unsigned long pool_count(struct shrinker *s, struct shrink_control *sc)
 }
 
 /*
- * pool_scan - fonction utilisée par le shrinker pour 
+ * pool_scan - fonction utilisée par le shrinker pour
  * désallouer des cmd_struct, on parcourt le pool et
  * on essaie de libérer les cmd_struct qui y sont présentes
  */
@@ -221,7 +219,7 @@ static unsigned long pool_scan(struct shrinker *s, struct shrink_control *sc)
 
 /*
  * list_remove_work - Retire un élément cmd_struct de la liste des
- * commandes actives, la fonction est appelée quand le champ refcount 
+ * commandes actives, la fonction est appelée quand le champ refcount
  * d'une cmd_struct a été mis à 0 par kref_put
  */
 static void list_remove_work(struct kref *ref)
@@ -238,7 +236,7 @@ static void list_remove_work(struct kref *ref)
 
 	/*
 	 * Kshell pipe - Data Transfer from kernel to user space.
-	 * 
+	 *
 	 * The idea is quick simple; if can't transfer at once, transfer as
 	 * mush as possible, mark this job as a FINISHED asynchronous one and
 	 * return. User space responsability is then to reclaim the remaining
@@ -256,8 +254,8 @@ static void list_remove_work(struct kref *ref)
 	to_p = up->buffer;
 	from_p = p->private_data;
 
-	if(!p->err && p->private_data_len) {
-		to_copy = min(USER_BUFFER_SIZE - 1 , p->private_data_len);
+	if (!p->err && p->private_data_len) {
+		to_copy = min(USER_BUFFER_SIZE - 1, p->private_data_len);
 
 		/* data_transfer */
 		p->err += copy_to_user(to_p, from_p, to_copy);
@@ -315,7 +313,7 @@ static void list_add_work(struct cmd_struct *w)
 
 /*
  * Chaque handler correspond à une commande que l'utilisateur
- * peut utiliser 
+ * peut utiliser
  */
 
 static void reset_handler(void)
@@ -329,7 +327,7 @@ static void reset_handler(void)
 		list_del(&p->list);
 
 		reset_cmd_id(p->cmd_id, p->fg_ed_cmd_id);
-		if(!p->err && p->private_data_len)
+		if (!p->err && p->private_data_len)
 			kfree(p->private_data);
 		kmem_cache_free(cmd_struct_cachep, p);
 	}
@@ -430,11 +428,13 @@ static void list_handler(struct work_struct *w)
 			break;
 
 		case meminfo:
-			len = scnprintf(v, sizeof(v), "meminfo\t%d\n", ip->cmd_id);
+			len = scnprintf(v, sizeof(v), "meminfo\t%d\n",
+								ip->cmd_id);
 			break;
 
 		case modinfo:
-			len = scnprintf(v, sizeof(v), "modinfo\t%d\n", ip->cmd_id);
+			len = scnprintf(v, sizeof(v), "modinfo\t%d\n",
+								ip->cmd_id);
 			break;
 
 		default:
@@ -454,7 +454,8 @@ static void list_handler(struct work_struct *w)
 				goto out;
 			}
 
-			memcpy((void *)buffer, (void *)buffer_realloc, buffer_size / 2);
+			memcpy((void *)buffer, (void *)buffer_realloc,
+							buffer_size / 2);
 			kfree(buffer_realloc);
 		}
 
@@ -487,11 +488,11 @@ static void meminfo_handler(struct work_struct *w)
 		p->err = -ENOMEM;
 		goto out;
 	}
-	
+
 	memset(buffer, '\0', BUFF_SIZE * sizeof(char));
 	si_meminfo(&si);
 	si_swapinfo(&si);
-	
+
 	len = scnprintf(v, sizeof(v), "MemTotal:\t%lu kB\n", KB(si.totalram));
 	strncat(buffer, v, len);
 	count += len;
@@ -507,16 +508,18 @@ static void meminfo_handler(struct work_struct *w)
 	len = scnprintf(v, sizeof(v), "HighTotal:\t%lu kB\n", KB(si.totalhigh));
 	strncat(buffer, v, len);
 	count += len;
-	
+
 	len = scnprintf(v, sizeof(v), "HighFree:\t%lu kB\n", KB(si.freehigh));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "LowTotal:\t%lu kB\n", KB((si.totalram - si.totalhigh)) );
+	len = scnprintf(v, sizeof(v), "LowTotal:\t%lu kB\n",
+					KB((si.totalram - si.totalhigh)));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "LowFree:\t%lu kB\n", KB((si.freeram - si.freehigh)) );
+	len = scnprintf(v, sizeof(v), "LowFree:\t%lu kB\n",
+					KB((si.freeram - si.freehigh)));
 	strncat(buffer, v, len);
 	count += len;
 
@@ -527,7 +530,7 @@ static void meminfo_handler(struct work_struct *w)
 	len = scnprintf(v, sizeof(v), "SwapFree:\t%lu kB\n", KB(si.freeswap));
 	strncat(buffer, v, len);
 	count += len;
-	
+
 	p->private_data = buffer;
 	p->private_data_len = count;
 
@@ -543,7 +546,8 @@ out:
 	}
 }
 
-static void kill_handler(struct work_struct *w){
+static void kill_handler(struct work_struct *w)
+{
 	int proc_pid;
 	int sig;
 	int err;
@@ -553,7 +557,7 @@ static void kill_handler(struct work_struct *w){
 
 	p = container_of(w, struct cmd_struct, work);
 	cp = (struct common *)p->user_datap;
-	
+
 	err = __get_user(proc_pid, (int __user *)&cp->cmd_id);
 	err += __get_user(sig, (int __user *)&cp->sig);
 	if (err) {
@@ -561,17 +565,17 @@ static void kill_handler(struct work_struct *w){
 		p->err = -EFAULT;
 		goto out;
 	}
-	
+
 	pid = find_get_pid(proc_pid);
 	if (!pid) {
-		pr_info("[KILL] PID NOT FOUND \n");
+		pr_info("[KILL] PID NOT FOUND.\n");
 		p->err = -EFAULT;
 		goto out;
 	}
 
 	err = kill_pid(pid, sig, 1);
 	put_pid(pid);
-	
+
 	p->err = err;
 
 out:
@@ -598,7 +602,7 @@ static void modinfo_handler(struct work_struct *w)
 	count = 0;
 	p = container_of(w, struct cmd_struct, work);
 	cp = (struct common *)p->user_datap;
-	
+
 	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
 	if (!buffer) {
 		p->err = -ENOMEM;
@@ -657,7 +661,7 @@ static void modinfo_handler(struct work_struct *w)
 	strncat(buffer, v, len);
 	count += len;
 
-	for(i = 0; i < m->num_kp; i++) {
+	for (i = 0; i < m->num_kp; i++) {
 		len = scnprintf(v, sizeof(v), "param:\t%s\n", m->kp[i].name);
 		strncat(buffer, v, len);
 		count += len;
@@ -678,10 +682,11 @@ out:
 	}
 }
 
-/* 
+/*
  * kshell_ioctl - La fonction exécutée lorsque l'utilisateur
  * fait un appel système ioctl
  */
+
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
 	int err = 0;
@@ -712,9 +717,11 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	 */
 
 	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg,
+							_IOC_SIZE(cmd));
 	if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_READ, (void __user *)arg,
+							_IOC_SIZE(cmd));
 	if (err)
 		return -EFAULT;
 
@@ -728,8 +735,8 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	}
 
 	memset(s, '\0', sizeof(struct cmd_struct));
-	kref_init(&s->refcount); 
-	
+	kref_init(&s->refcount);
+
 	s->cmd_id = find_cmd_id();
 	s->user_datap = (void *)arg;
 
@@ -791,8 +798,11 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		return -ENOTTY;
 	}
 
-	/*  Get a reference for the `fg` which reclaim this job - see fg_handler */
-	if(s->asynchro)
+	/*
+	 * Get a reference for the `fg` which will
+	 * reclaim this job - see fg_handler
+	 */
+	if (s->asynchro)
 		kref_get(&s->refcount);
 
 	/* Get a reference for the thread worker */
@@ -826,7 +836,7 @@ static int __init hello_init(void)
 
 	/* NOTE: `SLAB_PANIC` causes the slab layer to panic if the allocation
 	 * fails. This flag is useful when the allocation must not fail.
-	 * ^see slab.h^ 
+	 * see slab.h
 	 *
 	 * As result, the return value is not checked for NULL.
 	 */
@@ -869,7 +879,7 @@ module_init(hello_init);
 static void __exit hello_exit(void)
 {
 	reset_handler();
-	
+
 	destroy_workqueue(kshell_wq);
 	unregister_shrinker(&kshell_shrinker);
 	kmem_cache_destroy(cmd_struct_cachep);

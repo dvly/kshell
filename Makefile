@@ -13,16 +13,10 @@ else
 all :
 	make -C $(KERNELDIR) M=$(PWD) modules
 
-cp:
-	cp kshell.ko ../tosend/kshell.ko
-
 check:
-	$(CHECK_PATCH) -f kshell.c
-
-check_test:
-	for f in *.c *.h; do
-		$(CHECK_PATCH) --no-tree -f $$f
-	done
+	$(CHECK_PATCH) --no-tree -f common.h;
+	$(CHECK_PATCH) --no-tree -f kshell.h;
+	$(CHECK_PATCH) --no-tree -f kshell.c;
 
 clean:
 	make -C $(KERNELDIR) M=$(PWD) clean
