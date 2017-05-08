@@ -1,0 +1,10 @@
+--- linux-4.2.3-orig/mm/swapfile.c	2017-05-08 20:34:07.731772537 +0200
++++ linux-4.2.3/mm/swapfile.c	2017-05-08 20:33:25.095108520 +0200
+@@ -2578,6 +2578,7 @@ void si_swapinfo(struct sysinfo *val)
+ 	spin_unlock(&swap_lock);
+ }
+ 
++EXPORT_SYMBOL(si_swapinfo);
+ /*
+  * Verify that a swap entry is valid and increment its swap map count.
+  *
