@@ -94,7 +94,7 @@ int main(int argc, char *argv[]){
 			}
 			else{
 				data.cmd_id = atoi(cmd_arg[1]);
-				return_value = ioctl(fd, SYNC_IOC_FG, &data);
+				return_value = ioctl(fd, SYNC_IOC_FG, (void*)&data);
 			}
 		}
 		else if(strcmp(cmd_arg[0], "kill") == 0){
@@ -105,9 +105,9 @@ int main(int argc, char *argv[]){
 			/*TODO : Initialiser data*/
 
 			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_KILL, &data);
+				return_value = ioctl(fd, ASYNC_IOC_KILL, (void*)&data);
 			else
-				return_value = ioctl(fd, SYNC_IOC_KILL, &data);
+				return_value = ioctl(fd, SYNC_IOC_KILL, (void*)&data);
 		}
 		else if(strcmp(cmd_arg[0], "wait") == 0){
 			printf("wait\n");
@@ -117,45 +117,51 @@ int main(int argc, char *argv[]){
 			/*TODO : Initialiser data*/
 
 			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_WAIT, &data);
+				return_value = ioctl(fd, ASYNC_IOC_WAIT, (void*)&data);
 			else
-				return_value = ioctl(fd, SYNC_IOC_WAIT, &data);
+				return_value = ioctl(fd, SYNC_IOC_WAIT, (void*)&data);
 		}
 		else if(strcmp(cmd_arg[0], "meminfo") == 0){
 			printf("meminfo\n");
 			if(nb_arg != 1)
 				goto ERRNBARG;
 			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_MEMINFO, &data);
+				return_value = ioctl(fd, ASYNC_IOC_MEMINFO, (void*)&data);
 			else
-				return_value = ioctl(fd, SYNC_IOC_MEMINFO, &data);
+				return_value = ioctl(fd, SYNC_IOC_MEMINFO, (void*)&data);
 		}
 		else if(strcmp(cmd_arg[0], "modinfo") == 0){
 			printf("modinfo\n");
 			if(nb_arg != 2)
 				goto ERRNBARG;
 
+			data.len = strlen(cmd_arg[1]);
 			strcpy(data.name, cmd_arg[1]);
+			printf("Le strlen de %s : %d\n", data.name, data.len);
 
 			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_MODINFO, &data);
+				return_value = ioctl(fd, ASYNC_IOC_MODINFO, (void*)&data);
 			else
-				return_value = ioctl(fd, SYNC_IOC_MODINFO, &data);
+				return_value = ioctl(fd, SYNC_IOC_MODINFO, (void*)&data);
 		}
 		else{
 			printf("La commande demandée n'existe pas\n");
 		}
 
-		if(return_value < 0)
+		if(return_value < 0){
+			printf("ERROR %d\n", return_value);
 			return errno;
+		}	
 
 		if(!background){
 			printf("%s", data.buffer);
 			while(data.pipe_id != 0){
 				memset(data.buffer, '\0', USER_BUFFER_SIZE-1);
+				data.cmd_id = data.pipe_id;
 				return_value = ioctl(fd, SYNC_IOC_FG, &data);
 				if(return_value < 0)
-					return errno;
+					printf("ERROR in loop\n");
+					//return errno;
 
 				printf("%s", data.buffer);
 			}
@@ -172,8 +178,10 @@ CONT:	if(cmd_arg != NULL){
 			 */
 			cmd_arg = NULL;
 		}
+		printf("continue\n");
 		continue;
 	}
 
+	printf("after for loop\n");
 	close(fd);
 }
