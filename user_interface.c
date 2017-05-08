@@ -75,74 +75,80 @@ int main(int argc, char *argv[]){
 
 		if(strcmp(cmd_arg[0], "list") == 0){
 			printf("list\n"); 
-			if(nb_arg != 1)
-				goto ERRNBARG;
+			if(nb_arg != 1){
+				if(background){
+					printf("Impossible de lancer list en arriere plan\n");
+					goto CONT;
+				}
+				else
+					goto ERRNBARG;
+			}
 
-			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_LIST, &data);
-			else
-				return_value = ioctl(fd, SYNC_IOC_LIST, &data);
+			return_value = ioctl(fd, SYNC_IOC_LIST, &data);
 		}
 		else if(strcmp(cmd_arg[0], "fg") == 0){
 			printf("fg\n");
-			if(nb_arg != 2)
-				goto ERRNBARG;
-
-			if(background){	
-				printf("Impossible de lancer fg en arrière plan\n");
-				goto CONT;
+			if(nb_arg != 2){
+				if(background){	
+					printf("Impossible de lancer fg en arrière plan\n");
+					goto CONT;
+				}
+				else
+					goto ERRNBARG;
 			}
-			else{
-				data.cmd_id = atoi(cmd_arg[1]);
-				return_value = ioctl(fd, SYNC_IOC_FG, (void*)&data);
-			}
+			data.cmd_id = atoi(cmd_arg[1]);
+			return_value = ioctl(fd, SYNC_IOC_FG, (void*)&data);
 		}
 		else if(strcmp(cmd_arg[0], "kill") == 0){
 			printf("kill\n");
-			if(nb_arg != 3)
-				goto ERRNBARG;
-
+			if(nb_arg == 3){ 
 			/*TODO : Initialiser data*/
-
-			if(background)	
-				return_value = ioctl(fd, ASYNC_IOC_KILL, (void*)&data);
-			else
 				return_value = ioctl(fd, SYNC_IOC_KILL, (void*)&data);
+			}
+			else if(nb_arg == 4 && background){ 
+				return_value = ioctl(fd, ASYNC_IOC_KILL, (void*)&data);
+			}
+			else
+				goto ERRNBARG;
 		}
 		else if(strcmp(cmd_arg[0], "wait") == 0){
 			printf("wait\n");
 			if(nb_arg < 2)
 				goto ERRNBARG;
-
+			if(nb_arg > 2 && background){ 
 			/*TODO : Initialiser data*/
-
-			if(background)	
 				return_value = ioctl(fd, ASYNC_IOC_WAIT, (void*)&data);
-			else
+			}
+			else if(nb_arg >= 2){ 
 				return_value = ioctl(fd, SYNC_IOC_WAIT, (void*)&data);
+			}
+			else
+				goto ERRNBARG;
 		}
 		else if(strcmp(cmd_arg[0], "meminfo") == 0){
 			printf("meminfo\n");
-			if(nb_arg != 1)
-				goto ERRNBARG;
-			if(background)	
+			if(nb_arg == 2 && background)	
 				return_value = ioctl(fd, ASYNC_IOC_MEMINFO, (void*)&data);
-			else
+			else if(nb_arg == 1)
 				return_value = ioctl(fd, SYNC_IOC_MEMINFO, (void*)&data);
+			else
+				goto ERRNBARG;
 		}
 		else if(strcmp(cmd_arg[0], "modinfo") == 0){
 			printf("modinfo\n");
-			if(nb_arg != 2)
-				goto ERRNBARG;
 
-			data.len = strlen(cmd_arg[1]);
-			strcpy(data.name, cmd_arg[1]);
-			printf("Le strlen de %s : %d\n", data.name, data.len);
+			if(nb_arg >= 2){
+				data.len = strlen(cmd_arg[1]);
+				strcpy(data.name, cmd_arg[1]);
+				printf("Le strlen de %s : %d\n", data.name, data.len);
+			}
 
-			if(background)	
+			if(nb_arg == 3 && background)	
 				return_value = ioctl(fd, ASYNC_IOC_MODINFO, (void*)&data);
-			else
+			else if(nb_arg == 2)
 				return_value = ioctl(fd, SYNC_IOC_MODINFO, (void*)&data);
+			else
+				goto ERRNBARG;
 		}
 		else{
 			printf("La commande demandée n'existe pas\n");
