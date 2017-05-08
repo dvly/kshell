@@ -103,10 +103,15 @@ int main(int argc, char *argv[]){
 		else if(strcmp(cmd_arg[0], "kill") == 0){
 			printf("kill\n");
 			if(nb_arg == 3){ 
-			/*TODO : Initialiser data*/
+				data.cmd_id = atoi(cmd_arg[2]); 
+				data.sig = atoi(cmd_arg[1]+1);
+
 				return_value = ioctl(fd, SYNC_IOC_KILL, (void*)&data);
 			}
 			else if(nb_arg == 4 && background){ 
+				data.cmd_id = atoi(cmd_arg[2]); 
+				data.sig = atoi(cmd_arg[1]+1);
+
 				return_value = ioctl(fd, ASYNC_IOC_KILL, (void*)&data);
 			}
 			else
@@ -157,7 +162,7 @@ int main(int argc, char *argv[]){
 
 		if(return_value < 0){
 			printf("ERROR %d\n", return_value);
-			continue;
+			goto CONT;
 		}	
 
 		if(!background){
@@ -168,7 +173,7 @@ int main(int argc, char *argv[]){
 				return_value = ioctl(fd, SYNC_IOC_FG, &data);
 				if(return_value < 0){
 					printf("ERROR %d\n", return_value);
-					continue;
+					goto CONT;
 				}
 				printf("%s", data.buffer);
 			}
