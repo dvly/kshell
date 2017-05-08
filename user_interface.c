@@ -34,6 +34,7 @@ int main(int argc, char *argv[]){
 	for(;;){
 		nb_arg = 0;
 		background = 0;
+		return_value = 0;
 		
 		printf("Veuillez entrer votre commande\n");
 		/*Buffer overflow protection*/
@@ -156,7 +157,7 @@ int main(int argc, char *argv[]){
 
 		if(return_value < 0){
 			printf("ERROR %d\n", return_value);
-			return errno;
+			continue;
 		}	
 
 		if(!background){
@@ -165,10 +166,10 @@ int main(int argc, char *argv[]){
 				memset(data.buffer, '\0', USER_BUFFER_SIZE-1);
 				data.cmd_id = data.pipe_id;
 				return_value = ioctl(fd, SYNC_IOC_FG, &data);
-				if(return_value < 0)
-					printf("ERROR in loop\n");
-					//return errno;
-
+				if(return_value < 0){
+					printf("ERROR %d\n", return_value);
+					continue;
+				}
 				printf("%s", data.buffer);
 			}
 		}
