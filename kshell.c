@@ -116,12 +116,8 @@ static struct kshell_struct *pool_alloc_entry(void)
 	if (!list_empty(&k_pool)) {
 		entry = container_of(k_pool.next, struct kshell_struct, list);
 		list_del(&entry->list);
-		mutex_unlock(&kp_mutex);
-
-		memset(entry, '\0', sizeof(struct kshell_struct));
-		kref_get(&entry->refcount);
-	} else
-		mutex_unlock(&kp_mutex);
+	}
+	mutex_unlock(&kp_mutex);
 
 	return entry;
 }
@@ -495,6 +491,8 @@ static void modinfo_handler(struct work_struct *w)
 	}
 
 	memset(v, '\0', sizeof(v));
+	memset(buffer, '\0', sizeof(buffer));
+
 	err = __get_user(len, (int __user *)&cp->len);
 	err += copy_from_user((void *)v, (void __user *)cp->name, len);
 	if (err) {
@@ -601,16 +599,17 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	if (err)
 		return -EFAULT;
 
+
+	ioctl_err = 0;
 	s = pool_alloc_entry();
 	if (s == NULL) {
 		s = kmem_cache_alloc(kshell_struct_cachep, GFP_KERNEL);
 		if (unlikely(!s))
 			return -ENOMEM;
+	}
 
-		memset(s, '\0', sizeof(struct kshell_struct));
-		kref_init(&s->refcount);
-	} 
-	/* else `s` already memset_ed && kref_ed */
+	memset(s, '\0', sizeof(struct kshell_struct));
+	kref_init(&s->refcount); 
 	
 	s->cmd_id = find_cmd_id();
 	s->user_datap = (void *)arg;
@@ -664,13 +663,11 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 		break;
 
 	case KSHELL_IOC_RESET:
-		cmd_id[s->cmd_id - 1] = 0;
 		pool_add_entry(s);
 		reset_handler();
 		return 0;
 
 	default: /* redudant, as cmd was checked before !*/
-		cmd_id[s->cmd_id - 1] = 0;
 		pool_add_entry(s);
 		return -ENOTTY;
 	}
