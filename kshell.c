@@ -517,6 +517,60 @@ out:
 
 }
 
+static void wait_handler(struct work_struct *w)
+{
+	int i;
+	int err;
+	int nr_pid;
+	int to_wait[10];
+	char *buffer;
+	struct task_pid **ts;
+	struct common *cp;
+	struct kshell_struct *p;
+
+	p = container_of(w, struct kshell_struct, work);
+
+	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
+	if (!buffer) {
+		p->err = -ENOMEM;
+		goto out;
+	}
+
+	err = __get_user(nr_pid, (int __user *)&cp->len);
+	err += copy_from_user(to_wait, (void __user *)cp->to_wait,
+						sizeof(int) * nr_pid);
+	if (err) {
+		pr_info("[  kshell_WAIT ] error at copy_from_user.\n");
+		kfree(buffer);
+		p->err = -EFAULT;
+		goto out;
+	}
+
+	for (i = 0; i < nr_pid; i++)
+		ts[i] = pid_task(find_vpid(tmp_work->pb->pid[i]), PIDTYPE_PID);
+
+	for(; ; i++)
+		if (ts[i % nr_pid]->stata > 0)
+			break;
+
+	len = scnprintf(buffer, BUFF_SIZE, "[%d]", ts[i]->exit_code);
+
+	p->private_data = buffer;
+	p->private_data = len;
+
+out:
+	kref_put(&p->refcount, list_remove_work);
+
+	if (p->asynchro) {
+		p->fg_cond = 1;
+		wake_up_interruptible(&waiter);
+	} else {
+		p->ioctl_cond = 1;
+		wake_up_interruptible(&waiter);
+	}
+	
+}
+
 static void modinfo_handler(struct work_struct *w)
 {
 	int i, len, count, err;

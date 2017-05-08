@@ -26,6 +26,7 @@
 struct common {
 	char name[32];
 	char buffer[USER_BUFFER_SIZE];
+	int to_wait[10];
 	int cmd_id;
 	int sig;
 	int len;
