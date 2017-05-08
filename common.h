@@ -27,6 +27,7 @@ struct common {
 	char name[32];
 	char buffer[USER_BUFFER_SIZE];
 	int cmd_id;
+	int sig;
 	int len;
 	int pipe_id;
 };

@@ -472,6 +472,51 @@ static void meminfo_handler(struct work_struct *w)
 */
 }
 
+static void kill_handler(struct work_struct *w){
+	int proc_pid;
+	int sig;
+	int err;
+	struct pid *pid;
+	struct common *cp;
+	struct kshell_struct *p;
+
+	p = container_of(w, struct kshell_struct, work);
+	cp = (struct common *)p->user_datap;
+	
+	err = __get_user(proc_pid, (int __user *)&cp->cmd_id);
+	err += __get_user(sig, (int __user *)&cp->sig);
+	if (err) {
+		pr_info("[  kshell_KILL ] error at copy_from_user.\n");
+		p->err = -EFAULT;
+		goto out;
+	}
+	
+	pid = find_get_pid(proc_pid);
+	if (!pid) {
+		pr_info("[KILL] PID NOT FOUND \n");
+		p->err = -EFAULT;
+		goto out;
+	}
+
+	err = kill_pid(pid, sig, 1);
+	put_pid(pid);
+	
+	p->err = err;
+
+out:
+	kref_put(&p->refcount, list_remove_work);
+
+	if (p->asynchro) {
+		p->fg_cond = 1;
+		wake_up_interruptible(&waiter);
+	} else {
+		p->ioctl_cond = 1;
+		wake_up_interruptible(&waiter);
+	}
+
+
+}
+
 static void modinfo_handler(struct work_struct *w)
 {
 	int i, len, count, err;
@@ -635,7 +680,7 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 
 	case SYNC_IOC_KILL:
 		s->cmd = kill;
-		INIT_WORK(&s->work, list_handler);
+		INIT_WORK(&s->work, kill_handler);
 		break;
 
 	case ASYNC_IOC_WAIT:
