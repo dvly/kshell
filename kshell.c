@@ -16,11 +16,12 @@ static int cmd_id[MAX_CMD_ID] = {0};
 static int max_id_reached; /* increment this when MAX_CMD_ID reached */
 static struct mutex id_mutex;
 
-static struct kmem_cache *kshell_struct_cachep;
+static struct kmem_cache *cmd_struct_cachep;
 
 enum kshell_cmd {list, fg, kill, wait, meminfo, modinfo};
 
-struct kshell_struct {
+/* cmd_struct contient toutes les informations liées à une commande. */
+struct cmd_struct {
 	struct work_struct work;
 	struct list_head list;
 	struct kref refcount;
@@ -49,10 +50,22 @@ struct kshell_struct {
 };
 
 /* List and lock for all CMDs */
+/* kshell_cmd_list est la liste de toutes les commandes en cours d'exécution*/
 static LIST_HEAD(kshell_cmd_list);
 static DEFINE_SPINLOCK(kc_lock);
 
-/* pool */
+/* 
+ * k_pool est une liste contenant les cmd_struct des commandes 
+ * qui ont finies d'être exécutées.
+ * Cette liste évite de désallouer et réallouer des cmd_struct 
+ * en permanance. Si une commande est appelée par l'utilisateur, 
+ * et qu'il y a des cmd_struct disponibles dans le pool alors il 
+ * nous suffit d'en reprendre un, la reinitialiser, puis la remettre 
+ * dans la liste des commandes actives : kshell_cmd_list.
+ *
+ * Par ailleurs lorsque le shrinker passe c'est les éléments qui sont présents dans
+ * le k_pool qui sont déalloués.
+ */
 static LIST_HEAD(k_pool);
 static struct mutex kp_mutex;
 
@@ -61,7 +74,7 @@ static DECLARE_WAIT_QUEUE_HEAD(waiter);
 static struct workqueue_struct *kshell_wq;
 
 /*
- * find_cmd_id - find and return an unique id.
+ * find_cmd_id - cherche et retourne un id unique pour les commandes 
  */
 static int find_cmd_id(void)
 {
@@ -73,7 +86,7 @@ static int find_cmd_id(void)
 			break;
 
 	/*
-	 * code become more easy when we don't
+	 * code become easier when we don't
 	 * use the last case
 	 */
 	if (i < MAX_CMD_ID - 1) {
@@ -108,13 +121,19 @@ static void reset_cmd_id(int a, int b)
 
 }
 
-static struct kshell_struct *pool_alloc_entry(void)
+/*
+ * pool_alloc_entry - Retire un élément cmd_struct de la pool  
+ *
+ * @return : retourne le cmd_struct retiré 
+ *
+ */
+static struct cmd_struct *pool_alloc_entry(void)
 {
-	struct kshell_struct *entry = NULL;
+	struct cmd_struct *entry = NULL;
 
 	mutex_lock(&kp_mutex);
 	if (!list_empty(&k_pool)) {
-		entry = container_of(k_pool.next, struct kshell_struct, list);
+		entry = container_of(k_pool.next, struct cmd_struct, list);
 		list_del(&entry->list);
 	}
 	mutex_unlock(&kp_mutex);
@@ -122,7 +141,10 @@ static struct kshell_struct *pool_alloc_entry(void)
 	return entry;
 }
 
-static void pool_add_entry(struct kshell_struct *p)
+/*
+ * pool_add_entry - Ajoute une cmd_struct dans le pool
+ */
+static void pool_add_entry(struct cmd_struct *p)
 {
 	reset_cmd_id(p->cmd_id, p->fg_ed_cmd_id);
 
@@ -131,12 +153,22 @@ static void pool_add_entry(struct kshell_struct *p)
 	mutex_unlock(&kp_mutex);
 }
 
-/* Exclusively used by `fg` to put it's reference of the cmd it reclaims */
+/* 
+ * kref_ed_entry - Utilisée uniquement par fg, et concerne donc
+ * des commandes en background. Cette fonction permet de retirer 
+ * un élément cmd_list de la liste des commandes actives : cmd_list.
+ *
+ * on utilise cette fonction plutôt que list_remove_work car
+ * list_remove_work transmet en même temps des données, ce qui est
+ * dans notre cas déjà fait par fg_handler.
+ *
+ * L'élément retiré de cmd_list est ajouté à la pool.
+ */
 static void kref_ed_entry(struct kref *ref)
 {
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 
-	p = container_of(ref, struct kshell_struct, refcount);
+	p = container_of(ref, struct cmd_struct, refcount);
 
 	spin_lock(&kc_lock);
 	list_del(&p->list);
@@ -145,11 +177,15 @@ static void kref_ed_entry(struct kref *ref)
 	pool_add_entry(p);
 }
 
-
+/*
+ * pool_count - fonction utilisée par le shrinker pour
+ * compter le nombre de cmd_struct libérables (ce sont
+ * les cmd_struct présentes dans le pool)
+ */
 static unsigned long pool_count(struct shrinker *s, struct shrink_control *sc)
 {
 	int count = 0;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 
 	mutex_lock(&kp_mutex);
 	list_for_each_entry(p, &k_pool, list) {
@@ -160,22 +196,32 @@ static unsigned long pool_count(struct shrinker *s, struct shrink_control *sc)
 	return count;
 }
 
+/*
+ * pool_scan - fonction utilisée par le shrinker pour 
+ * désallouer des cmd_struct, on parcourt le pool et
+ * on essaie de libérer les cmd_struct qui y sont présentes
+ */
 static unsigned long pool_scan(struct shrinker *s, struct shrink_control *sc)
 {
 	int count = 0;
-	struct kshell_struct *p, *next;
+	struct cmd_struct *p, *next;
 
 	mutex_lock(&kp_mutex);
 	list_for_each_entry_safe(p, next, &k_pool, list) {
 		count += 1;
 		list_del(&p->list);
-		kmem_cache_free(kshell_struct_cachep, p);
+		kmem_cache_free(cmd_struct_cachep, p);
 	}
 	mutex_unlock(&kp_mutex);
 
 	return count;
 }
 
+/*
+ * list_remove_work - Retire un élément cmd_struct de la liste des
+ * commandes actives, la fonction est appelée quand le champ refcount 
+ * d'une cmd_struct a été mis à 0 par kref_put
+ */
 static void list_remove_work(struct kref *ref)
 {
 	int to_copy, eot = 0;
@@ -183,9 +229,9 @@ static void list_remove_work(struct kref *ref)
 	const void *from_i, *from_p;
 
 	struct common *up;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 
-	p = container_of(ref, struct kshell_struct, refcount);
+	p = container_of(ref, struct cmd_struct, refcount);
 	up = (struct common *)p->user_datap;
 
 	/*
@@ -254,16 +300,25 @@ static void list_remove_work(struct kref *ref)
 	pool_add_entry(p);
 }
 
-static void list_add_work(struct kshell_struct *w)
+/*
+ * list_add_work - Ajoute une cmd_struct dans la liste
+ * des commandes actives
+ */
+static void list_add_work(struct cmd_struct *w)
 {
 	spin_lock(&kc_lock);
 	list_add_tail(&w->list, &kshell_cmd_list);
 	spin_unlock(&kc_lock);
 }
 
+/*
+ * Chaque handler correspond à une commande que l'utilisateur
+ * peut utiliser 
+ */
+
 static void reset_handler(void)
 {
-	struct kshell_struct *p, *next;
+	struct cmd_struct *p, *next;
 
 	flush_workqueue(kshell_wq);
 
@@ -274,14 +329,14 @@ static void reset_handler(void)
 		reset_cmd_id(p->cmd_id, p->fg_ed_cmd_id);
 		if(!p->err && p->private_data_len)
 			kfree(p->private_data);
-		kmem_cache_free(kshell_struct_cachep, p);
+		kmem_cache_free(cmd_struct_cachep, p);
 	}
 	spin_unlock(&kc_lock);
 
 	mutex_lock(&kp_mutex);
 	list_for_each_entry_safe(p, next, &k_pool, list) {
 		list_del(&p->list);
-		kmem_cache_free(kshell_struct_cachep, p);
+		kmem_cache_free(cmd_struct_cachep, p);
 	}
 	mutex_unlock(&kp_mutex);
 }
@@ -291,9 +346,9 @@ static void fg_handler(struct work_struct *w)
 	int cmd_id, err;
 	bool found = false;
 	struct common *cp;
-	struct kshell_struct *p, *ip;
+	struct cmd_struct *p, *ip;
 
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
 	cp = (struct common *)p->user_datap;
 
 	err = __get_user(cmd_id, (int __user *)&cp->cmd_id);
@@ -346,13 +401,13 @@ static void list_handler(struct work_struct *w)
 {
 	int i, len, count, buffer_size;
 	char *buffer, *buffer_realloc, v[32];
-	struct kshell_struct *p, *ip;
+	struct cmd_struct *p, *ip;
 
 	i = 1;
 	len = 0;
 	count = 0;
 	buffer_size = BUFF_SIZE;
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
 
 	buffer = kmalloc(buffer_size, GFP_KERNEL);
 	if (!buffer) {
@@ -437,10 +492,10 @@ static void meminfo_handler(struct work_struct *w)
 /*
 	int err;
 	struct sysinfo si;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 	struct meminfo_common *mi;
 
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
 	mi = (struct meminfo_common *)p->user_datap;
 
 	si_meminfo(&si);
@@ -478,9 +533,9 @@ static void kill_handler(struct work_struct *w){
 	int err;
 	struct pid *pid;
 	struct common *cp;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
 	cp = (struct common *)p->user_datap;
 	
 	err = __get_user(proc_pid, (int __user *)&cp->cmd_id);
@@ -522,11 +577,11 @@ static void modinfo_handler(struct work_struct *w)
 	int i, len, count, err;
 	char *buffer, v[32];
 	struct module *m;
-	struct kshell_struct *p;
+	struct cmd_struct *p;
 	struct common *cp;
 
 	count = 0;
-	p = container_of(w, struct kshell_struct, work);
+	p = container_of(w, struct cmd_struct, work);
 	cp = (struct common *)p->user_datap;
 	
 	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
@@ -608,10 +663,14 @@ out:
 	}
 }
 
+/* 
+ * kshell_ioctl - La fonction exécutée lorsque l'utilisateur
+ * fait un appel système ioctl
+ */
 static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 {
 	int err = 0;
-	struct kshell_struct *s;
+	struct cmd_struct *s;
 
 	/*
 	 * extracts the type and number bitfields, and don't decode wrong CMDs:
@@ -648,12 +707,12 @@ static long kshell_ioctl(struct file *iof, unsigned int cmd, unsigned long arg)
 	ioctl_err = 0;
 	s = pool_alloc_entry();
 	if (s == NULL) {
-		s = kmem_cache_alloc(kshell_struct_cachep, GFP_KERNEL);
+		s = kmem_cache_alloc(cmd_struct_cachep, GFP_KERNEL);
 		if (unlikely(!s))
 			return -ENOMEM;
 	}
 
-	memset(s, '\0', sizeof(struct kshell_struct));
+	memset(s, '\0', sizeof(struct cmd_struct));
 	kref_init(&s->refcount); 
 	
 	s->cmd_id = find_cmd_id();
@@ -756,7 +815,7 @@ static int __init hello_init(void)
 	 *
 	 * As result, the return value is not checked for NULL.
 	 */
-	kshell_struct_cachep = KMEM_CACHE(kshell_struct, SLAB_PANIC);
+	cmd_struct_cachep = KMEM_CACHE(cmd_struct, SLAB_PANIC);
 
 	major = register_chrdev(0, "kshell", &kshell_fops);
 	if (major < 0) {
@@ -786,7 +845,7 @@ out_unregister:
 	unregister_chrdev(major, "kshell");
 
 out_kmem_destroy:
-	kmem_cache_destroy(kshell_struct_cachep);
+	kmem_cache_destroy(cmd_struct_cachep);
 
 	return -1;
 }
@@ -798,7 +857,7 @@ static void __exit hello_exit(void)
 	
 	destroy_workqueue(kshell_wq);
 	unregister_shrinker(&kshell_shrinker);
-	kmem_cache_destroy(kshell_struct_cachep);
+	kmem_cache_destroy(cmd_struct_cachep);
 
 	unregister_chrdev(major, "kshell");
 	pr_info("[  kshell  ]  Module unloaded successfully\n");
