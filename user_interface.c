@@ -190,10 +190,8 @@ CONT:	if(cmd_arg != NULL){
 			 */
 			cmd_arg = NULL;
 		}
-		printf("continue\n");
 		continue;
 	}
 
-	printf("after for loop\n");
 	close(fd);
 }

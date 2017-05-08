@@ -6,6 +6,8 @@ MODULE_AUTHOR("Sofiane IDRI - Davy LY, UPMC");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1");
 
+#define KB(num) num << (PAGE_SHIFT - 10)
+
 static int major;
 
 /* ioctl stuffs */
@@ -469,23 +471,6 @@ out:
 	wake_up_interruptible(&waiter);
 }
 
-/*
-static int copy_to_struct(void __user *u, unsigned long num)
-{
-
-	char v[32];
-	int len;
-*/
-	/*
-	 * display in kilobytes.
-	 */
-/*
-	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10));
-
-	return copy_to_user(u, (const void *)v, len);
-	return 0;
-}
-*/
 
 static void meminfo_handler(struct work_struct *w)
 {
@@ -507,39 +492,39 @@ static void meminfo_handler(struct work_struct *w)
 	si_meminfo(&si);
 	si_swapinfo(&si);
 	
-	len = scnprintf(v, sizeof(v), "MemTotal:\t%lu\n", si.totalram);
+	len = scnprintf(v, sizeof(v), "MemTotal:\t%lu kB\n", KB(si.totalram));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "MemFree:\t%lu\n", si.freeram);
+	len = scnprintf(v, sizeof(v), "MemFree:\t%lu kB\n", KB(si.freeram));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "BufferRam:\t%lu\n", si.bufferram);
+	len = scnprintf(v, sizeof(v), "BufferRam:\t%lu kB\n", KB(si.bufferram));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "HighTotal:\t%lu\n", si.totalhigh);
+	len = scnprintf(v, sizeof(v), "HighTotal:\t%lu kB\n", KB(si.totalhigh));
 	strncat(buffer, v, len);
 	count += len;
 	
-	len = scnprintf(v, sizeof(v), "HighFree:\t%lu\n", si.freehigh);
+	len = scnprintf(v, sizeof(v), "HighFree:\t%lu kB\n", KB(si.freehigh));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "LowTotal:\t%lu\n", si.totalram - si.totalhigh);
+	len = scnprintf(v, sizeof(v), "LowTotal:\t%lu kB\n", KB((si.totalram - si.totalhigh)) );
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "LowFree:\t%lu\n", si.freeram - si.freehigh);
+	len = scnprintf(v, sizeof(v), "LowFree:\t%lu kB\n", KB((si.freeram - si.freehigh)) );
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "SwapTotal:\t%lu\n", si.totalswap);
+	len = scnprintf(v, sizeof(v), "SwapTotal:\t%lu kB\n", KB(si.totalswap));
 	strncat(buffer, v, len);
 	count += len;
 
-	len = scnprintf(v, sizeof(v), "SwapFree:\t%lu\n", si.freeswap);
+	len = scnprintf(v, sizeof(v), "SwapFree:\t%lu kB\n", KB(si.freeswap));
 	strncat(buffer, v, len);
 	count += len;
 	
