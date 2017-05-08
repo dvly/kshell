@@ -6,6 +6,8 @@ MODULE_AUTHOR("Sofiane IDRI - Davy LY, UPMC");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1");
 
+#define KB(num) num << (PAGE_SHIFT - 10)
+
 static int major;
 
 /* ioctl stuffs */
@@ -469,62 +471,76 @@ out:
 	wake_up_interruptible(&waiter);
 }
 
-/*
-static int copy_to_struct(void __user *u, unsigned long num)
-{
-
-	char v[32];
-	int len;
-*/
-	/*
-	 * display in kilobytes.
-	 */
-/*
-	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10));
-
-	return copy_to_user(u, (const void *)v, len);
-	return 0;
-}
-*/
 
 static void meminfo_handler(struct work_struct *w)
 {
-/*
-	int err;
+	int len, count = 0;
 	struct sysinfo si;
 	struct cmd_struct *p;
-	struct meminfo_common *mi;
+	char v[32];
+	char *buffer;
 
 	p = container_of(w, struct cmd_struct, work);
-	mi = (struct meminfo_common *)p->user_datap;
 
+	buffer = kmalloc(BUFF_SIZE, GFP_KERNEL);
+	if (!buffer) {
+		p->err = -ENOMEM;
+		goto out;
+	}
+	
+	memset(buffer, '\0', BUFF_SIZE * sizeof(char));
 	si_meminfo(&si);
 	si_swapinfo(&si);
-	err = copy_to_struct((void __user*)mi->MemTotal, si.totalram);
+	
+	len = scnprintf(v, sizeof(v), "MemTotal:\t%lu kB\n", KB(si.totalram));
+	strncat(buffer, v, len);
+	count += len;
 
-	err += copy_to_struct((void __user*)mi->MemFree, si.freeram);
-	err += copy_to_struct((void __user*)mi->Buffers, si.bufferram);
-	err += copy_to_struct((void __user*)mi->HighTotal, si.totalhigh);
-	err += copy_to_struct((void __user*)mi->HighFree, si.freehigh);
-	err += copy_to_struct((void __user*)mi->LowTotal, si.totalram - si.totalhigh);
-	err += copy_to_struct((void __user*)mi->LowFree, si.freeram - si.freehigh);
-	err += copy_to_struct((void __user*)mi->SwapTotal, si.totalswap);
-	err += copy_to_struct((void __user*)mi->SwapFree, si.freeswap);
+	len = scnprintf(v, sizeof(v), "MemFree:\t%lu kB\n", KB(si.freeram));
+	strncat(buffer, v, len);
+	count += len;
 
-	if (err)
-		p->err = -1;
+	len = scnprintf(v, sizeof(v), "BufferRam:\t%lu kB\n", KB(si.bufferram));
+	strncat(buffer, v, len);
+	count += len;
 
+	len = scnprintf(v, sizeof(v), "HighTotal:\t%lu kB\n", KB(si.totalhigh));
+	strncat(buffer, v, len);
+	count += len;
+	
+	len = scnprintf(v, sizeof(v), "HighFree:\t%lu kB\n", KB(si.freehigh));
+	strncat(buffer, v, len);
+	count += len;
 
+	len = scnprintf(v, sizeof(v), "LowTotal:\t%lu kB\n", KB((si.totalram - si.totalhigh)) );
+	strncat(buffer, v, len);
+	count += len;
+
+	len = scnprintf(v, sizeof(v), "LowFree:\t%lu kB\n", KB((si.freeram - si.freehigh)) );
+	strncat(buffer, v, len);
+	count += len;
+
+	len = scnprintf(v, sizeof(v), "SwapTotal:\t%lu kB\n", KB(si.totalswap));
+	strncat(buffer, v, len);
+	count += len;
+
+	len = scnprintf(v, sizeof(v), "SwapFree:\t%lu kB\n", KB(si.freeswap));
+	strncat(buffer, v, len);
+	count += len;
+	
+	p->private_data = buffer;
+	p->private_data_len = count;
+
+out:
 	kref_put(&p->refcount, list_remove_work);
 
 	if (p->asynchro) {
-		fg_cond = 1;
+		p->fg_cond = 1;
 		wake_up_interruptible(&waiter);
 	} else {
-		ioctl_cond = 1;
+		p->ioctl_cond = 1;
 		wake_up_interruptible(&waiter);
 	}
-*/
 }
 
 static void kill_handler(struct work_struct *w){
@@ -569,7 +585,6 @@ out:
 		wake_up_interruptible(&waiter);
 	}
 
-
 }
 
 static void modinfo_handler(struct work_struct *w)
@@ -591,7 +606,7 @@ static void modinfo_handler(struct work_struct *w)
 	}
 
 	memset(v, '\0', sizeof(v));
-	memset(buffer, '\0', sizeof(buffer));
+	memset(buffer, '\0', BUFF_SIZE * sizeof(char));
 
 	err = __get_user(len, (int __user *)&cp->len);
 	err += copy_from_user((void *)v, (void __user *)cp->name, len);
