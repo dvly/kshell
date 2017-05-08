@@ -103,14 +103,14 @@ int main(int argc, char *argv[]){
 		else if(strcmp(cmd_arg[0], "kill") == 0){
 			printf("kill\n");
 			if(nb_arg == 3){ 
+				data.sig = atoi(cmd_arg[1]);
 				data.cmd_id = atoi(cmd_arg[2]); 
-				data.sig = atoi(cmd_arg[1]+1);
 
 				return_value = ioctl(fd, SYNC_IOC_KILL, (void*)&data);
 			}
 			else if(nb_arg == 4 && background){ 
+				data.sig = atoi(cmd_arg[1]);
 				data.cmd_id = atoi(cmd_arg[2]); 
-				data.sig = atoi(cmd_arg[1]+1);
 
 				return_value = ioctl(fd, ASYNC_IOC_KILL, (void*)&data);
 			}
