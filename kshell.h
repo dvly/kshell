@@ -21,3 +21,4 @@
 
 
 #define MAX_CMD_ID 100
+#define KB(num) ((x) << (PAGE_SHIFT - 10))

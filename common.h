@@ -1,6 +1,6 @@
 #include <linux/ioctl.h>
 
-#define PARAM_BUFF_SIZE 100	
+#define PARAM_BUFF_SIZE 100
 #define KSHELL_IOC_MAGIC 'N'
 
 #define SYNC_IOC_LIST		_IOWR(KSHELL_IOC_MAGIC, 0, char *)
